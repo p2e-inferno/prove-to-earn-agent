@@ -1,0 +1,17 @@
+{
+  "name": "@p2e/dg-token-vendor-subgraph",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Subgraph indexing DG Token Vendor activity on Base, per wallet. Built and deployed with the Graph CLI; never imported by the web app.",
+  "scripts": {
+    "codegen": "graph codegen",
+    "build": "graph build",
+    "deploy": "graph deploy --node https://api.studio.thegraph.com/deploy/ dg-token-vendor",
+    "create-local": "graph create --node http://localhost:8020/ dg-token-vendor",
+    "deploy-local": "graph deploy --node http://localhost:8020/ --ipfs http://localhost:5001 dg-token-vendor"
+  },
+  "dependencies": {
+    "@graphprotocol/graph-cli": "0.97.1",
+    "@graphprotocol/graph-ts": "0.38.1"
+  }
+}

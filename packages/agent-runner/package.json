@@ -1,0 +1,39 @@
+{
+  "name": "@p2e/agent-runner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Autonomous agent runner for the P2E Inferno agent gateway. Runs as its own process; never bundled into the web app.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./paid-fetch": "./src/paid-fetch.ts",
+    "./wallet": "./src/wallet.ts"
+  },
+  "bin": {
+    "p2e-agent": "./bin/agent.ts"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "start": "ts-node --project ./tsconfig.json bin/agent.ts",
+    "register": "ts-node --project ./tsconfig.json bin/agent.ts register",
+    "run-quest": "ts-node --project ./tsconfig.json bin/agent.ts run",
+    "work": "ts-node --project ./tsconfig.json bin/agent.ts work",
+    "preflight": "ts-node --project ./tsconfig.json bin/agent.ts preflight"
+  },
+  "dependencies": {
+    "@coinbase/cdp-sdk": "^1.55.0",
+    "@ethereum-attestation-service/eas-sdk": "^2.9.0",
+    "@worldcoin/agentkit": "^0.2.1",
+    "@x402/core": "^2.25.0",
+    "@x402/evm": "^2.25.0",
+    "ethers": "^6.15.0",
+    "viem": "^2.50.4",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.1",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.1.6"
+  }
+}

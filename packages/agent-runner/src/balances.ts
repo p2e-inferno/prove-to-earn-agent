@@ -1,0 +1,77 @@
+import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
+import { ERC20_ABI } from "@/lib/blockchain/shared/abi-definitions";
+import { DG_TOKEN_VENDOR_ABI } from "@/lib/blockchain/shared/vendor-abi";
+import type { AgentWallet } from "./wallet";
+
+export interface WalletBalances {
+  /** Raw smallest-unit amounts, keyed by the symbol the task configs use. */
+  ETH: bigint;
+  USDC: bigint;
+  UP: bigint;
+  DG: bigint;
+}
+
+/** Held back from every ETH-spending decision so the next tx can still be sent. */
+export const GAS_RESERVE_WEI = 100_000_000_000_000n;
+
+export function spendableEth(balance: bigint): bigint {
+  return balance > GAS_RESERVE_WEI ? balance - GAS_RESERVE_WEI : 0n;
+}
+
+/**
+ * What the agent can actually spend right now.
+ *
+ * This is the fact the sequencing turns on: a run can ask for a UP trade the
+ * wallet has no UP for, and the only way through is to acquire it first.
+ */
+export async function readBalances(
+  wallet: AgentWallet,
+): Promise<WalletBalances> {
+  const erc20 = async (token: `0x${string}`): Promise<bigint> => {
+    try {
+      return (await wallet.publicClient.readContract({
+        address: token,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [wallet.address],
+      })) as bigint;
+    } catch {
+      return 0n;
+    }
+  };
+
+  const dgToken = await vendorSwapToken(wallet);
+
+  const [eth, usdc, up, dg] = await Promise.all([
+    wallet.publicClient.getBalance({ address: wallet.address }).catch(() => 0n),
+    erc20(UNISWAP_ADDRESSES.usdc),
+    erc20(UNISWAP_ADDRESSES.up),
+    dgToken ? erc20(dgToken) : Promise.resolve(0n),
+  ]);
+
+  return { ETH: eth, USDC: usdc, UP: up, DG: dg };
+}
+
+async function vendorSwapToken(
+  wallet: AgentWallet,
+): Promise<`0x${string}` | null> {
+  const vendor = process.env.NEXT_PUBLIC_DG_VENDOR_ADDRESS;
+  if (!vendor || !/^0x[a-fA-F0-9]{40}$/.test(vendor)) return null;
+  try {
+    const config = (await wallet.publicClient.readContract({
+      address: vendor as `0x${string}`,
+      abi: DG_TOKEN_VENDOR_ABI,
+      functionName: "getTokenConfig",
+    })) as { swapToken: `0x${string}` };
+    return config.swapToken;
+  } catch {
+    return null;
+  }
+}
+
+/** Readable for the model, which reasons about magnitudes rather than wei. */
+export function describeBalances(balances: WalletBalances): string {
+  return (Object.keys(balances) as Array<keyof WalletBalances>)
+    .map((symbol) => `${symbol}=${balances[symbol].toString()}`)
+    .join(" ");
+}

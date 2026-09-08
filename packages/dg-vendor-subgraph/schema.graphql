@@ -1,0 +1,58 @@
+# One row per wallet that has ever touched the vendor, with running totals so a
+# question like "how much have I bought this month" needs one read, not a scan.
+type VendorAccount @entity(immutable: false) {
+  id: ID!
+  stage: Int!
+  fuel: BigInt!
+  totalBought: BigInt!
+  totalSold: BigInt!
+  totalBurned: BigInt!
+  lightUpCount: Int!
+  firstSeenAt: BigInt!
+  lastActivityAt: BigInt!
+  purchases: [Purchase!]! @derivedFrom(field: "account")
+  sales: [Sale!]! @derivedFrom(field: "account")
+  lightUps: [LightUp!]! @derivedFrom(field: "account")
+  stageUpgrades: [StageUpgrade!]! @derivedFrom(field: "account")
+}
+
+type Purchase @entity(immutable: true) {
+  id: ID!
+  account: VendorAccount!
+  baseTokenAmount: BigInt!
+  swapTokenAmount: BigInt!
+  fee: BigInt!
+  txHash: Bytes!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+}
+
+type Sale @entity(immutable: true) {
+  id: ID!
+  account: VendorAccount!
+  swapTokenAmount: BigInt!
+  baseTokenAmount: BigInt!
+  fee: BigInt!
+  txHash: Bytes!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+}
+
+type LightUp @entity(immutable: true) {
+  id: ID!
+  account: VendorAccount!
+  burnAmount: BigInt!
+  newFuel: BigInt!
+  txHash: Bytes!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+}
+
+type StageUpgrade @entity(immutable: true) {
+  id: ID!
+  account: VendorAccount!
+  newStage: Int!
+  txHash: Bytes!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+}

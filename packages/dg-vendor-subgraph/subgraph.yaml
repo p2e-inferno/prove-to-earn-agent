@@ -1,0 +1,37 @@
+specVersion: 1.0.0
+description: DG Token Vendor activity on Base, indexed per wallet.
+repository: https://github.com/p2einferno/p2einferno-app
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum
+    name: DGTokenVendor
+    network: base
+    source:
+      address: "0x24DD71aDd0026E924e0Fc7a7701A851e2b9c09C4"
+      abi: DGTokenVendor
+      # Vendor deployment block; earlier blocks cannot hold its events.
+      startBlock: 30004995
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      file: ./src/mapping.ts
+      entities:
+        - VendorAccount
+        - Purchase
+        - Sale
+        - LightUp
+        - StageUpgrade
+      abis:
+        - name: DGTokenVendor
+          file: ./abis/DGTokenVendor.json
+      eventHandlers:
+        - event: TokensPurchased(indexed address,uint256,uint256,uint256)
+          handler: handleTokensPurchased
+        - event: TokensSold(indexed address,uint256,uint256,uint256)
+          handler: handleTokensSold
+        - event: Lit(indexed address,uint256,uint256)
+          handler: handleLit
+        - event: StageUpgraded(indexed address,uint8)
+          handler: handleStageUpgraded
