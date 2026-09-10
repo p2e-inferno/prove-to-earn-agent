@@ -36,6 +36,14 @@ async function lookupAgentbookHuman(
 export const POST = createPairingRoute({
   guard: "owner-or-agent-signature",
   handler: async (req: NextRequest): Promise<NextResponse> => {
+    if (process.env.NODE_ENV === "production") {
+      return agentError(
+        403,
+        "LEGACY_REGISTRATION_DISABLED",
+        "Create a hosted agent from the agent workspace",
+      );
+    }
+
     let body: Body;
     try {
       body = (await req.json()) as Body;
@@ -120,10 +128,9 @@ export const POST = createPairingRoute({
       agentId: String(row.agent_id),
       agentWallet: stored.agentWallet,
       rewardWallet: stored.grant.rewardWallet,
-      agentbookHumanId,
       capabilities,
       templateIds,
-      status: "active",
+      status: "ready",
     });
   },
 });

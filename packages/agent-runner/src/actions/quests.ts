@@ -155,6 +155,7 @@ export const deployLockAction: ActionDefinition<DeployLockInput> = {
       }),
     ];
 
+    await ctx.onTransactionPrepared?.({ approvals: [] });
     const txHash = await ctx.wallet.sendTransaction({
       to: factory,
       data: encodeFunctionData({

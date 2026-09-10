@@ -5,11 +5,15 @@
 const call = jest.fn();
 const runDailyQuest = jest.fn();
 const assertAgentNetwork = jest.fn();
+const executionMode = jest.fn();
 
 jest.mock("./session", () => ({
   AgentSession: class {
     call(...args: unknown[]) {
       return call(...args);
+    }
+    executionMode() {
+      return executionMode();
     }
   },
 }));
@@ -124,6 +128,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   sleep.mockResolvedValue(undefined);
   assertAgentNetwork.mockResolvedValue([]);
+  executionMode.mockResolvedValue("scheduled");
   runDailyQuest.mockResolvedValue(report());
 });
 
@@ -140,7 +145,7 @@ describe("classifyFailure", () => {
   it.each([
     ["GATEWAY_UNREACHABLE", "retryable"],
     ["IDEMPOTENCY_IN_FLIGHT", "retryable"],
-    ["INSUFFICIENT_UP", "agent_resolvable"],
+    ["INSUFFICIENT_UP", "owner_required"],
     ["VENDOR_PAUSED", "time_dependent"],
     ["SELL_COOLDOWN", "time_dependent"],
     ["AGENT_WALLET_NOT_KEYHOLDER", "owner_required"],
@@ -167,6 +172,16 @@ describe("retryDelayMs", () => {
   });
 });
 
+describe("AgentWorker.preflight", () => {
+  it("prevents the scheduled adapter from discovering owner-invoked agents", async () => {
+    executionMode.mockResolvedValue("owner_invoked");
+
+    await expect(
+      worker({ requiredExecutionMode: "scheduled" }).preflight(),
+    ).rejects.toThrow("owner_invoked, not scheduled");
+  });
+});
+
 describe("AgentWorker.runOnce", () => {
   it("acquires a lease, runs, and checkpoints completion", async () => {
     route({
@@ -181,6 +196,34 @@ describe("AgentWorker.runOnce", () => {
     expect(cycle.outcome).toBe("ran");
     const final = checkpoints().at(-1)!;
     expect(final).toMatchObject({ status: "completed", releaseLease: true });
+  });
+
+  it("continues an intentional cycle boundary without failure backoff", async () => {
+    runDailyQuest.mockResolvedValue(
+      report({
+        succeeded: false,
+        questCompleted: false,
+        blockingCode: "CYCLE_BOUND_REACHED",
+        blockingReason: "One action was completed in this cycle.",
+      }),
+    );
+    route({
+      "/execution": (body) =>
+        (body as { operation: string }).operation === "acquire"
+          ? acquired({ checkpoint: { attempts: 2 } })
+          : saved(),
+    });
+
+    const cycle = await worker().runOnce("run-1");
+
+    expect(cycle.outcome).toBe("continue");
+    expect(checkpoints().at(-1)).toMatchObject({
+      status: "waiting_retry",
+      checkpoint: { attempts: 2 },
+      nextRetryAt: new Date(1_000_000).toISOString(),
+      lastError: null,
+      releaseLease: true,
+    });
   });
 
   it("yields to the worker that already holds the lease", async () => {
@@ -228,6 +271,78 @@ describe("AgentWorker.runOnce", () => {
 
     expect(sleep).toHaveBeenCalledWith(1_000);
     expect(cycle.outcome).toBe("ran");
+  });
+
+  it("does not restore an intent whose pre-broadcast checkpoint failed", async () => {
+    let checkpointCalls = 0;
+    runDailyQuest
+      .mockImplementationOnce(async (_wallet, _config, options) => {
+        await options.onProgress({
+          actionTimeline: [
+            {
+              actionName: "p2e_uniswap_swap",
+              purpose: "quest_task",
+              taskId: "t1",
+              status: "broadcasting",
+            },
+          ],
+        });
+        return report();
+      })
+      .mockImplementationOnce(async (_wallet, _config, options) => {
+        expect(options.restoredTimeline).toEqual([]);
+        return report();
+      });
+    route({
+      "/execution": (body) => {
+        const operation = (body as { operation: string }).operation;
+        if (operation === "acquire") return acquired();
+        checkpointCalls += 1;
+        return checkpointCalls === 1
+          ? errResult("EXECUTION_CHECKPOINT_CONFLICT", 409)
+          : saved();
+      },
+    });
+
+    const cycle = await worker().runOnce("run-1");
+
+    expect(cycle.outcome).toBe("ran");
+    expect(sleep).toHaveBeenCalledWith(1_000);
+  });
+
+  it("retains a known hash in memory when its checkpoint fails", async () => {
+    const submitted = {
+      actionName: "p2e_uniswap_swap",
+      purpose: "quest_task" as const,
+      taskId: "t1",
+      status: "submitted" as const,
+      txHash: "0xhash",
+    };
+    let checkpointCalls = 0;
+    runDailyQuest
+      .mockImplementationOnce(async (_wallet, _config, options) => {
+        await options.onProgress({ actionTimeline: [submitted] });
+        return report();
+      })
+      .mockImplementationOnce(async (_wallet, _config, options) => {
+        expect(options.restoredTimeline).toEqual([submitted]);
+        return report();
+      });
+    route({
+      "/execution": (body) => {
+        const operation = (body as { operation: string }).operation;
+        if (operation === "acquire") return acquired();
+        checkpointCalls += 1;
+        return checkpointCalls === 1
+          ? errResult("EXECUTION_CHECKPOINT_CONFLICT", 409)
+          : saved();
+      },
+    });
+
+    const cycle = await worker().runOnce("run-1");
+
+    expect(cycle.outcome).toBe("ran");
+    expect(sleep).toHaveBeenCalledWith(1_000);
   });
 
   it("persists a retry once the immediate attempts are spent", async () => {
@@ -399,7 +514,27 @@ describe("owner decisions", () => {
     route({
       "/quests/run-1/execution": (body) =>
         (body as { operation: string }).operation === "acquire"
-          ? acquired({ checkpoint: { ownerResolution: "retry", attempts: 2 } })
+          ? acquired({
+              checkpoint: {
+                ownerResolution: "retry",
+                attempts: 2,
+                actionTimeline: [
+                  {
+                    actionName: "p2e_uniswap_swap",
+                    purpose: "quest_task",
+                    taskId: "t1",
+                    status: "broadcasting",
+                  },
+                  {
+                    actionName: "p2e_vendor_buy",
+                    purpose: "quest_task",
+                    taskId: "t2",
+                    status: "confirmed",
+                    txHash: "0xhash",
+                  },
+                ],
+              },
+            })
           : saved(),
       "/quests/run-1/complete": () => okResult({}),
     });
@@ -408,6 +543,14 @@ describe("owner decisions", () => {
 
     expect(runDailyQuest).toHaveBeenCalled();
     expect(checkpoints()[0]?.checkpoint).not.toHaveProperty("ownerResolution");
+    expect(runDailyQuest.mock.calls[0]?.[2]).toMatchObject({
+      restoredTimeline: [
+        expect.objectContaining({
+          actionName: "p2e_vendor_buy",
+          status: "confirmed",
+        }),
+      ],
+    });
   });
 });
 
@@ -643,4 +786,17 @@ describe("AgentWorker.start", () => {
 
     expect(cycles).toEqual([]);
   });
+});
+
+it("does not report completion after a rejected final checkpoint", async () => {
+  call.mockImplementation(async (_path, options) =>
+    options.body.operation === "acquire"
+      ? acquired()
+      : errResult("EXECUTION_LEASE_LOST", 409),
+  );
+  runDailyQuest.mockResolvedValue(report());
+  await expect(
+    new AgentWorker(wallet, config, { sleep }).runOnce("run-1"),
+  ).rejects.toThrow("checkpoint");
+  expect(checkpoints()).toHaveLength(1);
 });

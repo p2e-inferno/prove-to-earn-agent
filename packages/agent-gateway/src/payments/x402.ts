@@ -15,7 +15,6 @@ import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { getLogger } from "@/lib/utils/logger";
 import {
   AGENT_NETWORK,
-  agentkitDiscountEnabled,
   agentkitDiscountPercent,
   agentkitDiscountUses,
   agentAudienceOrigin,
@@ -51,7 +50,6 @@ function discountMode(): { type: "discount"; percent: number; uses: number } {
 }
 
 function agentkitHooks(): AgentkitHooks | null {
-  if (!agentkitDiscountEnabled()) return null;
   if (cachedHooks) return cachedHooks;
 
   try {
@@ -62,7 +60,11 @@ function agentkitHooks(): AgentkitHooks | null {
       agentBook,
       mode: discountMode(),
       storage: redisAgentKitStorage,
-      onEvent: (event) => log.info("agentkit", { event }),
+      onEvent: (event) =>
+        log.info("agentkit", {
+          type: event.type,
+          resource: event.resource,
+        }),
     });
     return cachedHooks;
   } catch (error) {
@@ -130,20 +132,18 @@ function buildFacilitator() {
 export function getResourceServer(): x402ResourceServer {
   if (cachedServer) return cachedServer;
 
-  const server = new x402ResourceServer(buildFacilitator());
+  const facilitator = buildFacilitator();
+  const server = new x402ResourceServer(facilitator);
   server.register(AGENT_NETWORK, new ExactEvmScheme());
 
   const hooks = agentkitHooks();
   if (hooks) {
     server.registerExtension(agentkitResourceServerExtension);
     if (hooks.verifyFailureHook) {
-      // AgentKit types the context more narrowly than x402 declares it; the
-      // fields it reads are a subset of what the resource server passes.
-      server.onVerifyFailure(
-        hooks.verifyFailureHook as unknown as Parameters<
-          typeof server.onVerifyFailure
-        >[0],
-      );
+      const recover = hooks.verifyFailureHook as unknown as Parameters<
+        typeof server.onVerifyFailure
+      >[0];
+      server.onVerifyFailure(verifiedDiscountHook(facilitator, recover));
     }
   }
 
@@ -209,17 +209,15 @@ export function routeConfigFor(routeId: string): RouteConfig {
     ),
   };
 
-  if (agentkitDiscountEnabled()) {
-    Object.assign(
-      extensions,
-      declareAgentkitExtension({
-        domain: new URL(agentAudienceOrigin()).host,
-        resourceUri: `${agentAudienceOrigin()}${spec.path}`,
-        network: AGENT_NETWORK,
-        mode: discountMode(),
-      }),
-    );
-  }
+  Object.assign(
+    extensions,
+    declareAgentkitExtension({
+      domain: new URL(agentAudienceOrigin()).hostname,
+      resourceUri: `${agentAudienceOrigin()}${spec.path}`,
+      network: AGENT_NETWORK,
+      mode: discountMode(),
+    }),
+  );
 
   return {
     accepts: [
@@ -284,4 +282,40 @@ export function allRouteConfigs(): Record<string, RouteConfig> {
     config[`${spec.method} ${spec.path}`] = routeConfigFor(spec.id);
   }
   return config;
+}
+
+type VerifyFailureHook = Parameters<x402ResourceServer["onVerifyFailure"]>[0];
+
+export function verifiedDiscountHook(
+  facilitator: Pick<ReturnType<typeof buildFacilitator>, "verify">,
+  recover: VerifyFailureHook,
+): VerifyFailureHook {
+  return async (context) => {
+    const payload = context.paymentPayload.payload as {
+      authorization?: { value?: unknown };
+      permit2Authorization?: { permitted?: { amount?: unknown } };
+    };
+    const raw =
+      payload.authorization?.value ??
+      payload.permit2Authorization?.permitted?.amount;
+    if (typeof raw !== "string" || !/^\d+$/.test(raw)) return;
+    const amount = BigInt(raw);
+    const full = BigInt(context.requirements.amount);
+    const minimum = (full * BigInt(100 - agentkitDiscountPercent())) / 100n;
+    if (amount < minimum || amount >= full) return;
+    const verified = await facilitator.verify(
+      JSON.parse(JSON.stringify(context.paymentPayload)) as Parameters<
+        typeof facilitator.verify
+      >[0],
+      {
+        ...context.requirements,
+        amount: raw,
+      },
+    );
+    if (!verified.isValid) return;
+    return recover({
+      ...context,
+      error: new Error("invalid_exact_evm_payload_authorization_value"),
+    });
+  };
 }

@@ -58,7 +58,7 @@ const AGENT = {
   ownerUserId: "did:privy:owner",
   agentWallet: "0xagent",
   rewardWallet: "0xowner",
-  label: "a",
+  displayName: "a",
   agentbookHumanId: null,
   status: "active" as const,
 };
@@ -322,4 +322,41 @@ describe("createAgentRoute ordering", () => {
       expect.objectContaining({ responseStatus: 503 }),
     );
   });
+});
+
+it("reacquires authoritative execution state instead of replaying a cached lease", async () => {
+  jest.clearAllMocks();
+  resolveAgentActor.mockResolvedValue(actorWith(["quests.start"]));
+  peekRequest.mockResolvedValue({
+    outcome: "found",
+    state: "completed",
+    responseStatus: 200,
+    responseBody: { execution: { state_version: 0 } },
+  });
+  let version = 1;
+  const handler = jest.fn(async () => ({
+    status: 200,
+    body: { execution: { state_version: version++ } },
+  }));
+  const route = createAgentRoute({
+    routeId: "executions.write",
+    idempotency: false,
+    handler,
+  });
+  const first = await route(
+    request(
+      { "idempotency-key": "lease" },
+      JSON.stringify({ operation: "acquire" }),
+    ),
+  );
+  const second = await route(
+    request(
+      { "idempotency-key": "lease" },
+      JSON.stringify({ operation: "acquire" }),
+    ),
+  );
+  expect((await first.json()).data.execution.state_version).toBe(1);
+  expect((await second.json()).data.execution.state_version).toBe(2);
+  expect(peekRequest).not.toHaveBeenCalled();
+  expect(handler).toHaveBeenCalledTimes(2);
 });

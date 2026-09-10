@@ -6,6 +6,7 @@ import {
 import { PERMIT2_ABI } from "@/lib/uniswap/abi/permit2";
 import { ERC20_ABI } from "@/lib/blockchain/shared/abi-definitions";
 import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
+import type { ActionContext } from "./actions/types";
 import type { AgentWallet } from "./wallet";
 
 const MAX_UINT256 = (1n << 256n) - 1n;
@@ -33,6 +34,7 @@ export async function ensureSwapApprovals(
   tokenIn: `0x${string}`,
   amountIn: bigint,
   isNativeEthIn: boolean,
+  onApproval?: ActionContext["onApprovalTransaction"],
 ): Promise<ApprovalStep[]> {
   if (isNativeEthIn) return [];
 
@@ -49,6 +51,7 @@ export async function ensureSwapApprovals(
   );
 
   if (erc20Allowance < amountIn) {
+    await onApproval?.({ step: "erc20-permit2" });
     const txHash = await wallet.sendTransaction({
       to: tokenIn,
       data: encodeFunctionData({
@@ -57,6 +60,7 @@ export async function ensureSwapApprovals(
         args: [permit2, MAX_UINT256],
       }),
     });
+    await onApproval?.({ step: "erc20-permit2", txHash });
     const receipt = await wallet.waitForReceipt(txHash);
     if (receipt.status !== "success") {
       throw new Error(`ERC20 approval for Permit2 reverted (${txHash})`);
@@ -77,6 +81,7 @@ export async function ensureSwapApprovals(
     permit2Allowance.expiration < nowSeconds + EXPIRY_BUFFER_SECONDS;
 
   if (permit2Allowance.amount < amountIn || expiresSoon) {
+    await onApproval?.({ step: "permit2-router" });
     const txHash = await wallet.sendTransaction({
       to: permit2,
       data: encodeFunctionData({
@@ -85,6 +90,7 @@ export async function ensureSwapApprovals(
         args: [tokenIn, router, MAX_UINT160, Number(MAX_UINT48)],
       }),
     });
+    await onApproval?.({ step: "permit2-router", txHash });
     const receipt = await wallet.waitForReceipt(txHash);
     if (receipt.status !== "success") {
       throw new Error(`Permit2 router approval reverted (${txHash})`);
@@ -106,6 +112,7 @@ export async function ensureErc20Allowance(
   token: `0x${string}`,
   spender: `0x${string}`,
   amount: bigint,
+  onApproval?: ActionContext["onApprovalTransaction"],
 ): Promise<ApprovalStep[]> {
   const allowance = (await wallet.publicClient.readContract({
     address: token,
@@ -116,6 +123,7 @@ export async function ensureErc20Allowance(
 
   if (allowance >= amount) return [];
 
+  await onApproval?.({ step: "erc20-spender" });
   const txHash = await wallet.sendTransaction({
     to: token,
     data: encodeFunctionData({
@@ -124,6 +132,7 @@ export async function ensureErc20Allowance(
       args: [spender, MAX_UINT256],
     }),
   });
+  await onApproval?.({ step: "erc20-spender", txHash });
   const receipt = await wallet.waitForReceipt(txHash);
   if (receipt.status !== "success") {
     throw new Error(`Token approval reverted for ${token}`);

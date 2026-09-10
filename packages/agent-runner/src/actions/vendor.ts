@@ -176,6 +176,7 @@ async function sendVendor(
         approval.token,
         vendorAddress(),
         approval.amount,
+        ctx.onApprovalTransaction,
       )
     : [];
   await ctx.wallet.publicClient.simulateContract({
@@ -185,6 +186,7 @@ async function sendVendor(
     ...(args ? { args } : {}),
     account: ctx.wallet.address,
   } as never);
+  await ctx.onTransactionPrepared?.({ approvals });
   const txHash = await ctx.wallet.sendTransaction({
     to: vendorAddress(),
     data: encodeFunctionData({

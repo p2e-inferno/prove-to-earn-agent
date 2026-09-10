@@ -37,6 +37,14 @@ export const POST = createPairingRoute({
     _params,
     ownerUserId: string | null,
   ): Promise<NextResponse> => {
+    if (process.env.NODE_ENV === "production") {
+      return agentError(
+        403,
+        "LEGACY_REGISTRATION_DISABLED",
+        "Create a hosted agent from the agent workspace",
+      );
+    }
+
     if (!ownerUserId) {
       return agentError(
         401,

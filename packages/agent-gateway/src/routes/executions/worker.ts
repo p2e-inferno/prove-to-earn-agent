@@ -5,6 +5,7 @@ import { createAgentRoute } from "../../route-factory";
 
 export const POST = createAgentRoute({
   routeId: "executions.write",
+  idempotency: false,
   resolveTemplateId: async ({ params }) =>
     params.runId ? templateIdForRun(params.runId) : null,
   handler: async (ctx) => {

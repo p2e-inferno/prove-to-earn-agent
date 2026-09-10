@@ -3,13 +3,10 @@ import { z } from "zod";
 import type { AgentWallet } from "./wallet";
 import type { RunnerConfig } from "./config";
 
-/**
- * Self-renewing: the agent holds the signing key, so no human is involved
- * after registration. This is what makes the loop autonomous.
- */
 export class AgentSession {
   private token: string | null = null;
   private expiresAtMs = 0;
+  private currentExecutionMode: "owner_invoked" | "scheduled" | null = null;
 
   constructor(
     private readonly wallet: AgentWallet,
@@ -54,8 +51,17 @@ export class AgentSession {
     }
 
     this.token = session.data.data.token;
+    this.currentExecutionMode = session.data.data.executionMode;
     this.expiresAtMs = Date.now() + session.data.data.expiresIn * 1000;
     return this.token;
+  }
+
+  async executionMode(): Promise<"owner_invoked" | "scheduled"> {
+    await this.bearer();
+    if (!this.currentExecutionMode) {
+      throw new Error("Session did not identify the agent execution mode");
+    }
+    return this.currentExecutionMode;
   }
 
   /**
@@ -122,6 +128,9 @@ const issuedSessionSchema = z
       .object({
         token: z.string().min(1),
         expiresIn: z.number().int().positive().default(900),
+        executionMode: z
+          .enum(["owner_invoked", "scheduled"])
+          .default("scheduled"),
       })
       .passthrough(),
   })

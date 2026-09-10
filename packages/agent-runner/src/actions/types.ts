@@ -252,6 +252,13 @@ export interface ActionContext {
   config: RunnerConfig;
   purpose: ActionPurpose;
   stateVersion: string;
+  onApprovalTransaction?(approval: {
+    step: string;
+    txHash?: Hex;
+  }): Promise<void>;
+  onTransactionPrepared?(preparation: {
+    approvals: Array<{ step: string; txHash: Hex }>;
+  }): Promise<void>;
   onTransactionSubmitted?(submission: {
     txHash: Hex;
     approvals: Array<{ step: string; txHash: Hex }>;

@@ -39,8 +39,8 @@ export const POST = createPairingRoute({
     if (!agent) {
       return agentError(401, "AGENT_UNKNOWN", "This agent is not registered");
     }
-    if (agent.status !== "active") {
-      return agentError(403, "AGENT_REVOKED", "This agent is not active");
+    if (agent.status !== "ready" || !agent.agentWallet) {
+      return agentError(409, "AGENT_NOT_READY", "This agent is not ready");
     }
 
     const challenge = await issueSessionChallenge(body.agentWallet);

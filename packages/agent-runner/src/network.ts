@@ -224,7 +224,11 @@ export async function assertAgentNetwork(
   // The Graph is optional, but a subgraph indexing another chain would answer
   // confidently about a history that is not this agent's.
   const graphNetwork = process.env.GRAPH_NETWORK?.trim();
-  if (graphNetwork || config.graphSubgraphId || config.graphVendorSubgraphId) {
+  if (
+    graphNetwork ||
+    config.graphUniswapSubgraphId ||
+    config.graphVendorSubgraphId
+  ) {
     checks.push({
       name: "graph.network",
       ok: graphNetwork === "base",

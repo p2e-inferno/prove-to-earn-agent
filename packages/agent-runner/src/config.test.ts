@@ -1,7 +1,7 @@
 /**
  * @jest-environment node
  */
-import { loadConfig } from "./config";
+import { loadConfig, loadPlatformConfig } from "./config";
 
 const ORIGINAL = { ...process.env };
 
@@ -43,4 +43,34 @@ describe("loadConfig wallet provider", () => {
     expect(config.walletProvider).toBe("local");
     expect(config.agentPrivateKey).toBe("0x01");
   });
+
+  it("validates the funding-swap budget", () => {
+    process.env.AGENT_WALLET_PROVIDER = "local";
+    process.env.AGENT_PRIVATE_KEY = "0x01";
+    process.env.AGENT_MAX_FUNDING_SWAPS = "-1";
+
+    expect(() => loadConfig()).toThrow(/AGENT_MAX_FUNDING_SWAPS/);
+  });
+
+  it("uses the platform OpenRouter model for hosted agents", () => {
+    delete process.env.AGENT_LLM_MODEL;
+    process.env.OPENROUTER_DEFAULT_MODEL = "provider/platform-model";
+
+    expect(
+      loadPlatformConfig({
+        providerAccountName: "p2e-12345678123412341234123456789012",
+        maxFundingSwaps: 3,
+      }).llmModel,
+    ).toBe("provider/platform-model");
+  });
 });
+
+it.each(["NaN", "-1", "5001", "1.5"])(
+  "rejects malformed hosted slippage %s",
+  (value) => {
+    process.env.AGENT_SLIPPAGE_BPS = value;
+    expect(() =>
+      loadPlatformConfig({ providerAccountName: "agent", maxFundingSwaps: 3 }),
+    ).toThrow("AGENT_SLIPPAGE_BPS");
+  },
+);

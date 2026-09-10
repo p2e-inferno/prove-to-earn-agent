@@ -72,6 +72,7 @@ export interface WorkerOptions {
   signal?: AbortSignal;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  requiredExecutionMode?: "owner_invoked" | "scheduled";
 }
 
 export interface WorkerCycle {
@@ -82,6 +83,7 @@ export interface WorkerCycle {
     | "terminal"
     | "no_work"
     | "waiting"
+    | "continue"
     | "retry_scheduled"
     | "decision_required"
     | "network_failed";
@@ -113,14 +115,14 @@ export function classifyFailure(code: string | undefined): FailureClass {
   ) {
     return "retryable";
   }
-  if (/INSUFFICIENT_(UP|DG|USDC|ETH)|APPROVAL_FAILED/.test(normalized)) {
+  if (/APPROVAL_FAILED/.test(normalized)) {
     return "agent_resolvable";
   }
   if (/PAUSED|COOLDOWN|PENDING|NOT_YET|TIME/.test(normalized)) {
     return "time_dependent";
   }
   if (
-    /KEYHOLDER|OWNER|SELECTION_REQUIRED|CHECKIN_NOT_FOUND|ADDRESS_MISMATCH|INSUFFICIENT_FUNDS|TRIAL_EXHAUSTED|FUNDING|NOT_OWNED/.test(
+    /KEYHOLDER|OWNER|SELECTION_REQUIRED|CHECKIN_NOT_FOUND|ADDRESS_MISMATCH|INSUFFICIENT_(?:FUNDS|UP|DG|USDC|ETH)|TRIAL_EXHAUSTED|FUNDING|NOT_OWNED/.test(
       normalized,
     )
   ) {
@@ -164,6 +166,7 @@ export class AgentWorker {
   private readonly now: () => number;
   private renewTimer: ReturnType<typeof setInterval> | null = null;
   private renewals = 0;
+  private renewalFailed = false;
   private discovery: { at: number; runId: string | null } | null = null;
   private readonly finishedRunIds = new Set<string>();
 
@@ -180,6 +183,14 @@ export class AgentWorker {
   /** Startup gate: nothing runs until the chain is the one we think it is. */
   async preflight(): Promise<void> {
     await assertAgentNetwork(this.wallet, this.config);
+    if (this.options.requiredExecutionMode) {
+      const mode = await this.session.executionMode();
+      if (mode !== this.options.requiredExecutionMode) {
+        throw new Error(
+          `Agent execution mode is ${mode}, not ${this.options.requiredExecutionMode}`,
+        );
+      }
+    }
   }
 
   private async acquire(runId: string): Promise<WorkerLease | WorkerCycle> {
@@ -256,11 +267,12 @@ export class AgentWorker {
       releaseLease?: boolean;
     },
   ): Promise<boolean> {
+    if (this.renewalFailed) throw new Error("Execution lease renewal failed");
     const response = await this.session.call<Record<string, unknown>>(
       `/api/agent/v1/quests/${runId}/execution`,
       {
         method: "POST",
-        idempotencyKey: `execution-checkpoint:${lease.executionId}:${lease.stateVersion}`,
+        idempotencyKey: `execution-checkpoint:${lease.executionId}:${lease.attemptToken}:${lease.stateVersion}`,
         body: {
           operation: "checkpoint",
           executionId: lease.executionId,
@@ -277,31 +289,41 @@ export class AgentWorker {
       },
     );
 
-    if (!response.ok) return false;
+    if (!response.ok) throw new Error("Execution checkpoint was rejected");
     const parsed = checkpointSchema.safeParse(
       (response.data as { execution?: unknown })?.execution ?? response.data,
     );
-    if (!parsed.success || parsed.data.outcome !== "saved") return false;
+    if (!parsed.success || parsed.data.outcome !== "saved") {
+      throw new Error("Execution checkpoint was not saved");
+    }
     lease.stateVersion = parsed.data.state_version ?? lease.stateVersion + 1;
     return true;
   }
 
   /** Renew while work is in flight, so a long run never loses its own lease. */
   private startRenewal(runId: string, lease: WorkerLease): void {
+    this.renewalFailed = false;
     const interval = this.config.leaseRenewMs ?? 40_000;
     this.renewTimer = setInterval(() => {
       // Its own operation, and its own idempotency key per beat: sharing the
       // checkpoint path made the heartbeat race the run's own terminal write.
       this.renewals += 1;
-      void this.session.call(`/api/agent/v1/quests/${runId}/execution`, {
-        method: "POST",
-        idempotencyKey: `execution-renew:${lease.executionId}:${this.renewals}`,
-        body: {
-          operation: "renew",
-          executionId: lease.executionId,
-          attemptToken: lease.attemptToken,
-        },
-      });
+      void this.session
+        .call(`/api/agent/v1/quests/${runId}/execution`, {
+          method: "POST",
+          idempotencyKey: `execution-renew:${lease.executionId}:${lease.attemptToken}:${this.renewals}`,
+          body: {
+            operation: "renew",
+            executionId: lease.executionId,
+            attemptToken: lease.attemptToken,
+          },
+        })
+        .then((response) => {
+          if (!response.ok) this.renewalFailed = true;
+        })
+        .catch(() => {
+          this.renewalFailed = true;
+        });
     }, interval);
     // A heartbeat must never be the reason a process refuses to exit.
     this.renewTimer.unref?.();
@@ -321,6 +343,13 @@ export class AgentWorker {
     // Consumed here, not carried forward: an answer applies to the attempt it
     // unblocked, and leaving it in the checkpoint would replay it every cycle.
     const { ownerResolution, ...carried } = lease.checkpoint;
+    if (ownerResolution === "retry" && Array.isArray(carried.actionTimeline)) {
+      carried.actionTimeline = (
+        carried.actionTimeline as ActionTimelineEntry[]
+      ).filter(
+        (entry) => entry.status !== "broadcasting" || Boolean(entry.txHash),
+      );
+    }
     lease.checkpoint = carried;
 
     const attempts = Number(carried.attempts ?? 0);
@@ -354,13 +383,26 @@ export class AgentWorker {
               ? (carried.actionTimeline as ActionTimelineEntry[])
               : [],
             onProgress: async ({ actionTimeline }) => {
-              carried.actionTimeline = actionTimeline;
-              const saved = await this.checkpoint(runId, lease, {
-                status: "running",
-                checkpoint: { ...carried, actionTimeline },
-              });
-              if (!saved)
+              const retainKnownHash = () => {
+                if (actionTimeline.at(-1)?.txHash) {
+                  carried.actionTimeline = actionTimeline;
+                }
+              };
+              let saved: boolean;
+              try {
+                saved = await this.checkpoint(runId, lease, {
+                  status: "running",
+                  checkpoint: { ...carried, actionTimeline },
+                });
+              } catch (error) {
+                retainKnownHash();
+                throw error;
+              }
+              if (!saved) {
+                retainKnownHash();
                 throw new Error("Transaction checkpoint was not saved");
+              }
+              carried.actionTimeline = actionTimeline;
             },
           });
           break;
@@ -393,15 +435,21 @@ export class AgentWorker {
         };
       }
 
-      const failure = report.succeeded
-        ? null
-        : classifyFailure(report.blockingCode);
+      const boundedContinuation =
+        !report.succeeded && report.blockingCode === "CYCLE_BOUND_REACHED";
+      const failure =
+        report.succeeded || boundedContinuation
+          ? null
+          : classifyFailure(report.blockingCode);
 
       // Confirmed work is never discarded by a later failure: the checkpoint
       // records what landed, and only the unfinished part is retried.
       const checkpoint: Record<string, unknown> = {
         ...carried,
-        attempts: failure && failure !== "fatal" ? attempts + 1 : attempts,
+        attempts:
+          failure && failure !== "fatal" && !boundedContinuation
+            ? attempts + 1
+            : attempts,
         questCompleted: report.questCompleted,
         settledTaskIds: report.tasks
           .filter((task) => task.status === "claimed")
@@ -412,6 +460,17 @@ export class AgentWorker {
         actionTimeline: report.actionTimeline ?? [],
         lastRunAt: this.now(),
       };
+
+      if (boundedContinuation) {
+        await this.checkpoint(runId, lease, {
+          status: "waiting_retry",
+          checkpoint,
+          nextRetryAt: new Date(this.now()).toISOString(),
+          lastError: null,
+          releaseLease: true,
+        });
+        return { outcome: "continue", runId, report };
+      }
 
       if (!failure) {
         await this.checkpoint(runId, lease, {

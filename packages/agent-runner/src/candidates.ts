@@ -35,7 +35,12 @@ export interface CandidateObservation {
   blockNumber: string;
   balances: ReturnType<typeof assetAmount>[];
   candidates: ActionCandidate[];
-  ownerBlockers: Array<{ taskId: string; code: string; message: string }>;
+  ownerBlockers: Array<{
+    taskId: string;
+    code: string;
+    message: string;
+    deficits?: ReturnType<typeof assetAmount>[];
+  }>;
   fatalBlockers: Array<{ taskId: string; code: string; message: string }>;
 }
 
@@ -500,12 +505,19 @@ export async function observeCandidates(args: {
     }
 
     for (const blocker of analysis.blockers) {
-      if (blocker.resolution === "owner")
+      if (blocker.resolution === "owner") {
+        const deficits = analysis.requirements
+          .map((requirement) => requirement.deficit)
+          .filter((deficit): deficit is NonNullable<typeof deficit> =>
+            Boolean(deficit),
+          );
         ownerBlockers.push({
           taskId: task.id,
           code: blocker.code,
           message: blocker.message,
+          ...(deficits.length > 0 ? { deficits } : {}),
         });
+      }
       if (blocker.resolution === "fatal")
         fatalBlockers.push({
           taskId: task.id,
@@ -534,10 +546,16 @@ export async function observeCandidates(args: {
       const blocker = analysis.blockers.find(
         (item) => item.resolution === "agent",
       )!;
+      const deficits = analysis.requirements
+        .map((requirement) => requirement.deficit)
+        .filter((deficit): deficit is NonNullable<typeof deficit> =>
+          Boolean(deficit),
+        );
       ownerBlockers.push({
         taskId: task.id,
         code: "OWNER_PREREQUISITE_UNAVAILABLE",
         message: `The agent could not build a safe prerequisite for ${blocker.code}.`,
+        ...(deficits.length > 0 ? { deficits } : {}),
       });
     }
   }
@@ -565,11 +583,28 @@ export async function observeCandidates(args: {
   };
 }
 
+class TransactionJournalError extends Error {}
+
+async function journal<T>(
+  callback: (value: T) => Promise<void>,
+  value: T,
+): Promise<void> {
+  try {
+    await callback(value);
+  } catch (error) {
+    throw new TransactionJournalError(
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 export async function executeCandidate(args: {
   candidate: ActionCandidate;
   expectedStateVersion: string;
   wallet: AgentWallet;
   config: RunnerConfig;
+  onApprovalTransaction?: ActionContext["onApprovalTransaction"];
+  onTransactionPrepared?: ActionContext["onTransactionPrepared"];
   onTransactionSubmitted?: ActionContext["onTransactionSubmitted"];
 }) {
   const candidate = actionCandidateSchema.parse(args.candidate);
@@ -634,6 +669,9 @@ export async function executeCandidate(args: {
       message: "The balances or protocol state changed after observation.",
     });
   }
+  let submitted:
+    | Parameters<NonNullable<ActionContext["onTransactionSubmitted"]>>[0]
+    | undefined;
   let result;
   try {
     result = await action.execute(
@@ -642,11 +680,26 @@ export async function executeCandidate(args: {
         config: args.config,
         purpose: candidate.purpose,
         stateVersion: candidate.stateVersion,
-        onTransactionSubmitted: args.onTransactionSubmitted,
+        onApprovalTransaction: args.onApprovalTransaction
+          ? (value) => journal(args.onApprovalTransaction!, value)
+          : undefined,
+        onTransactionPrepared: args.onTransactionPrepared
+          ? (value) => journal(args.onTransactionPrepared!, value)
+          : undefined,
+        onTransactionSubmitted: async (value) => {
+          submitted = value;
+          if (args.onTransactionSubmitted) {
+            await journal(args.onTransactionSubmitted, value);
+          }
+        },
       },
       input,
     );
   } catch (error) {
+    if (error instanceof TransactionJournalError) throw error;
+    if (submitted) {
+      return actionResultSchema.parse({ status: "submitted", ...submitted });
+    }
     const message = error instanceof Error ? error.message : String(error);
     const normalized = message.toLowerCase();
     if (normalized.includes("insufficient funds")) {

@@ -1,3 +1,4 @@
+import { AGENT_ROUTES } from "./pricing";
 import type { AgentKitStorage } from "@worldcoin/agentkit";
 import { getUpstashRedis } from "@/lib/upstash/redis";
 import { getLogger } from "@/lib/utils/logger";
@@ -6,7 +7,6 @@ const log = getLogger("agent-gateway:payments:agentkit-storage");
 
 const USAGE_PREFIX = "agentkit:usage";
 const NONCE_PREFIX = "agentkit:nonce";
-const USAGE_TTL_SECONDS = 60 * 60 * 24 * 31;
 const NONCE_TTL_SECONDS = 60 * 60 * 24;
 
 // INCR then compare would let two concurrent requests both pass the limit, so
@@ -20,9 +20,6 @@ if limit ~= nil and current >= limit then
   return 0
 end
 local next_value = redis.call('INCR', KEYS[1])
-if next_value == 1 then
-  redis.call('EXPIRE', KEYS[1], ARGV[2])
-end
 return 1
 `;
 
@@ -44,13 +41,15 @@ export class RedisAgentKitStorage implements AgentKitStorage {
       return false;
     }
 
-    const key = `${USAGE_PREFIX}:${endpoint}:${humanId}`;
+    const canonical =
+      AGENT_ROUTES.find((route) =>
+        new RegExp(`^${route.path.replace(/\[[^\]]+\]/g, "[^/]+")}$`).test(
+          endpoint,
+        ),
+      )?.path ?? endpoint;
+    const key = `${USAGE_PREFIX}:${canonical}:${humanId}`;
     try {
-      const result = await redis.eval(
-        TRY_INCREMENT,
-        [key],
-        [String(limit), String(USAGE_TTL_SECONDS)],
-      );
+      const result = await redis.eval(TRY_INCREMENT, [key], [String(limit)]);
       return Number(result) === 1;
     } catch (error) {
       log.error("AgentKit usage increment failed", { endpoint, error });
@@ -58,15 +57,18 @@ export class RedisAgentKitStorage implements AgentKitStorage {
     }
   }
 
+  // Fail closed, like tryIncrementUsage: AgentKit treats "not used" as a fresh
+  // nonce, so answering false when the store is unreadable would waive replay
+  // protection. Refusing the discount is the safe answer.
   async hasUsedNonce(nonce: string): Promise<boolean> {
     const redis = getUpstashRedis();
-    if (!redis) return false;
+    if (!redis) return true;
     try {
       const seen = await redis.get(`${NONCE_PREFIX}:${nonce}`);
       return seen !== null && seen !== undefined;
     } catch (error) {
       log.error("AgentKit nonce read failed", { error });
-      return false;
+      return true;
     }
   }
 

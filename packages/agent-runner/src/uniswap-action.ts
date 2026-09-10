@@ -10,6 +10,7 @@ import { quoteSwapRoute, resolveSwapRoute } from "@/lib/uniswap/route";
 import { getDataSuffix } from "@/lib/blockchain/attribution";
 import type { SwapDirection, SwapPair } from "@/lib/uniswap/types";
 import type { AgentWallet } from "./wallet";
+import type { ActionContext } from "./actions/types";
 import { ensureSwapApprovals, type ApprovalStep } from "./approvals";
 import type { RunnerConfig } from "./config";
 
@@ -41,6 +42,8 @@ export async function executeSwap(
   wallet: AgentWallet,
   config: RunnerConfig,
   request: SwapRequest,
+  onTransactionPrepared?: (approvals: ApprovalStep[]) => Promise<void>,
+  onApprovalTransaction?: ActionContext["onApprovalTransaction"],
 ): Promise<SwapExecution> {
   if (!ROUTE_CONFIG[request.pair]) {
     throw new Error(`Unsupported pair: ${request.pair}`);
@@ -97,8 +100,10 @@ export async function executeSwap(
     route.tokenIn,
     request.amountIn,
     route.nativeInput,
+    onApprovalTransaction,
   );
 
+  await onTransactionPrepared?.(approvals);
   const txHash = await wallet.sendTransaction({
     to: UNISWAP_ADDRESSES.universalRouter as `0x${string}`,
     data,

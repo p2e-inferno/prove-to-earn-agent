@@ -125,6 +125,7 @@ function settlementFromHeaders(res: NextResponse): {
 
 export interface CreateAgentRouteOptions {
   routeId: string;
+  idempotency?: boolean;
   handler: AgentHandler;
   /**
    * Template the capability is scoped against, when the route carries one.
@@ -151,6 +152,8 @@ export interface CreateAgentRouteOptions {
  */
 export function createAgentRoute(options: CreateAgentRouteOptions) {
   const spec = routeSpec(options.routeId);
+  if (options.idempotency === false && spec.tier !== "free")
+    throw new Error("Paid mutations require idempotency");
   const isMutation = spec.method !== "GET";
   const isFree = spec.tier === "free";
 
@@ -337,7 +340,7 @@ export function createAgentRoute(options: CreateAgentRouteOptions) {
 
     let identity: RequestIdentity | null = null;
 
-    if (isMutation) {
+    if (isMutation && options.idempotency !== false) {
       const idempotencyKey = req.headers.get("idempotency-key");
       if (!isValidIdempotencyKey(idempotencyKey)) {
         return agentError(
@@ -430,6 +433,7 @@ export function createPairingRoute(options: {
    */
   guard:
     | "owner-privy-session"
+    | "admin-session"
     | "agent-wallet-signature"
     | "owner-or-agent-signature"
     | "public";
@@ -449,6 +453,13 @@ export function createPairingRoute(options: {
     const params = rawParams ? await rawParams : {};
 
     let ownerUserId: string | null = null;
+
+    if (options.guard === "admin-session") {
+      const { ensureAdminOrRespond } =
+        await import("@/lib/auth/route-handlers/admin-guard");
+      const denied = await ensureAdminOrRespond(req);
+      if (denied) return denied;
+    }
 
     if (options.guard === "owner-privy-session") {
       const { getPrivyUserFromNextRequest } = await import("@/lib/auth/privy");

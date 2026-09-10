@@ -73,6 +73,14 @@ export async function resolveAgentActor(
       message: "This agent is suspended",
     };
   }
+  if (agent.status !== "ready" || !agent.agentWallet) {
+    return {
+      ok: false,
+      status: 409,
+      code: "AGENT_NOT_READY",
+      message: "This agent is not ready to execute requests",
+    };
+  }
 
   const permissions = await loadPermissions(agent.id);
 
@@ -87,7 +95,6 @@ export async function resolveAgentActor(
         rewardWallet: agent.rewardWallet,
         actorKind: "agent",
         agentId: agent.id,
-        agentbookHumanId: agent.agentbookHumanId ?? undefined,
       },
     },
   };

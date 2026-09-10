@@ -163,15 +163,23 @@ export const uniswapSwapAction: ActionDefinition<UniswapSwapInput> = {
       });
     }
     const parsed = uniswapSwapInputSchema.parse(input);
-    const execution = await executeSwap(ctx.wallet, ctx.config, {
-      pair: parsed.pair,
-      direction: parsed.direction,
-      amountIn: BigInt(parsed.amountInRaw),
-      amountOutMin: parsed.amountOutMinRaw
-        ? BigInt(parsed.amountOutMinRaw)
+    const execution = await executeSwap(
+      ctx.wallet,
+      ctx.config,
+      {
+        pair: parsed.pair,
+        direction: parsed.direction,
+        amountIn: BigInt(parsed.amountInRaw),
+        amountOutMin: parsed.amountOutMinRaw
+          ? BigInt(parsed.amountOutMinRaw)
+          : undefined,
+        slippageBps: ctx.config.slippageBps,
+      },
+      ctx.onTransactionPrepared
+        ? (approvals) => ctx.onTransactionPrepared!({ approvals })
         : undefined,
-      slippageBps: ctx.config.slippageBps,
-    });
+      ctx.onApprovalTransaction,
+    );
     await ctx.onTransactionSubmitted?.(execution);
     const receipt = await ctx.wallet.waitForReceipt(execution.txHash);
     if (receipt.status !== "success") {

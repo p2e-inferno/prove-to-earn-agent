@@ -28,22 +28,18 @@ export async function readBalances(
   wallet: AgentWallet,
 ): Promise<WalletBalances> {
   const erc20 = async (token: `0x${string}`): Promise<bigint> => {
-    try {
-      return (await wallet.publicClient.readContract({
-        address: token,
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [wallet.address],
-      })) as bigint;
-    } catch {
-      return 0n;
-    }
+    return (await wallet.publicClient.readContract({
+      address: token,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [wallet.address],
+    })) as bigint;
   };
 
   const dgToken = await vendorSwapToken(wallet);
 
   const [eth, usdc, up, dg] = await Promise.all([
-    wallet.publicClient.getBalance({ address: wallet.address }).catch(() => 0n),
+    wallet.publicClient.getBalance({ address: wallet.address }),
     erc20(UNISWAP_ADDRESSES.usdc),
     erc20(UNISWAP_ADDRESSES.up),
     dgToken ? erc20(dgToken) : Promise.resolve(0n),

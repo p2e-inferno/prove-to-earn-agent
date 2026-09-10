@@ -1,4 +1,9 @@
-export { loadConfig, type RunnerConfig, type WalletProvider } from "./config";
+export {
+  loadConfig,
+  loadPlatformConfig,
+  type RunnerConfig,
+  type WalletProvider,
+} from "./config";
 export {
   createAgentWallet,
   createCdpWallet,

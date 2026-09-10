@@ -67,9 +67,9 @@ export function worldChainRpcUrl(): string | undefined {
   return process.env.WORLD_CHAIN_RPC_URL;
 }
 
-/** Off unless explicitly enabled, so a missing World config never blocks payment. */
-export function agentkitDiscountEnabled(): boolean {
-  return process.env.AGENTKIT_DISCOUNT_ENABLED === "true";
+export function agentOwnerLimit(): number {
+  const raw = Number(process.env.AGENT_MAX_NON_REVOKED_PER_OWNER || 1);
+  return Number.isSafeInteger(raw) && raw > 0 && raw <= 100 ? raw : 1;
 }
 
 export function agentkitDiscountPercent(): number {

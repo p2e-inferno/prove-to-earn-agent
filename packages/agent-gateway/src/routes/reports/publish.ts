@@ -28,7 +28,8 @@ export const GET = createPairingRoute({
       );
     }
     const limit = Number(req.nextUrl.searchParams.get("limit") ?? 20);
-    const result = await listAgentRunReports(ownerUserId, limit);
+    const agentId = req.nextUrl.searchParams.get("agentId") ?? undefined;
+    const result = await listAgentRunReports(ownerUserId, limit, agentId);
     const { status, envelope } = toEnvelope(result.status, result.body);
     return NextResponse.json(envelope, { status });
   },

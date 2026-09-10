@@ -322,6 +322,32 @@ describe("runDailyQuest", () => {
     expect(executeCandidate).not.toHaveBeenCalled();
   });
 
+  it("requires owner reconciliation when a broadcast may lack a recorded hash", async () => {
+    route({
+      "/quests/run-1/start": () => okResult({}),
+      "/reports": () => okResult({}),
+      "/quests": () => listWith([swapTask("t1")]),
+    });
+
+    const report = await runDailyQuest(wallet, config, {
+      restoredTimeline: [
+        {
+          actionName: "p2e_uniswap_swap",
+          purpose: "quest_task",
+          taskId: "t1",
+          status: "broadcasting",
+        },
+      ],
+    });
+
+    expect(report.blockingCode).toBe(
+      "OWNER_TRANSACTION_RECONCILIATION_REQUIRED",
+    );
+    expect(report.ownerQuestions?.[0]?.blockedTaskId).toBe("t1");
+    expect(getTransactionReceipt).not.toHaveBeenCalled();
+    expect(executeCandidate).not.toHaveBeenCalled();
+  });
+
   it("reports and stops when the quest list cannot be read", async () => {
     route({ "/quests": () => errResult("GATEWAY_UNREACHABLE", 0) });
 
@@ -349,7 +375,7 @@ describe("runDailyQuest", () => {
     expect(report.blockingCode).toBe("DAILY_QUEST_PATH_ALREADY_SELECTED");
   });
 
-  it("attempts every task and finalizes only when all are done", async () => {
+  it("executes at most one state-changing candidate per cycle", async () => {
     modelPicksEveryCandidate();
     let claimed = 0;
     route({
@@ -364,11 +390,11 @@ describe("runDailyQuest", () => {
 
     const report = await runDailyQuest(wallet, config, {});
 
-    expect(executeCandidate).toHaveBeenCalledTimes(2);
-    expect(report.tasks.map((t) => t.status)).toEqual(["claimed", "claimed"]);
-    expect(report.questCompleted).toBe(true);
-    expect(report.keyTxHash).toBe("0xkey");
-    expect(report.succeeded).toBe(true);
+    expect(executeCandidate).toHaveBeenCalledTimes(1);
+    expect(report.tasks.map((t) => t.status)).toEqual(["claimed", "skipped"]);
+    expect(report.questCompleted).toBe(false);
+    expect(report.blockingCode).toBe("CYCLE_BOUND_REACHED");
+    expect(report.succeeded).toBe(false);
   });
 
   it("does not redo a task the server already recorded as done", async () => {
@@ -660,6 +686,57 @@ describe("runDailyQuest", () => {
     ]);
   });
 
+  it("stops when the configured funding-swap budget is exhausted", async () => {
+    const prerequisite = {
+      ...candidateFor("t1"),
+      candidateId: `cand_${"b".repeat(32)}`,
+      purpose: {
+        kind: "prerequisite" as const,
+        forTaskId: "t1",
+        resolves: [
+          {
+            kind: "asset" as const,
+            asset: "UP" as const,
+            requiredRaw: "10",
+            deficitRaw: "10",
+          },
+        ],
+      },
+    } as ActionCandidate;
+    observeCandidates.mockResolvedValue({
+      stateVersion: "s1",
+      blockNumber: "1",
+      balances: [],
+      candidates: [prerequisite],
+      ownerBlockers: [],
+      fatalBlockers: [],
+    });
+    route({
+      "/quests/run-1/start": () => okResult({}),
+      "/reports": () => okResult({}),
+      "/quests": () => listWith([swapTask("t1")]),
+    });
+
+    const report = await runDailyQuest(
+      wallet,
+      { ...config, maxFundingSwaps: 1 },
+      {
+        restoredTimeline: [
+          {
+            actionName: "p2e_uniswap_swap",
+            purpose: "prerequisite",
+            taskId: "t1",
+            status: "confirmed",
+            txHash: HASH,
+          },
+        ],
+      },
+    );
+
+    expect(executeCandidate).not.toHaveBeenCalled();
+    expect(report.blockingCode).toBe("FUNDING_SWAP_LIMIT");
+  });
+
   it("records every executed action in the timeline, quest and prerequisite alike", async () => {
     offerCandidatesFor(["t1"]);
     route({
@@ -683,6 +760,54 @@ describe("runDailyQuest", () => {
         txHash: HASH,
       }),
     ]);
+  });
+
+  it("checkpoints intent before broadcast and the hash before confirmation", async () => {
+    offerCandidatesFor(["t1"]);
+    executeCandidate.mockImplementation(
+      async (args: {
+        onTransactionPrepared?: (value: { approvals: [] }) => Promise<void>;
+        onTransactionSubmitted?: (value: {
+          txHash: `0x${string}`;
+          approvals: [];
+        }) => Promise<void>;
+      }) => {
+        await args.onTransactionPrepared?.({ approvals: [] });
+        await args.onTransactionSubmitted?.({
+          txHash: HASH as `0x${string}`,
+          approvals: [],
+        });
+        return {
+          status: "confirmed",
+          txHash: HASH,
+          approvals: [],
+          blockNumber: "1",
+        };
+      },
+    );
+    route({
+      "/quests/run-1/start": () => okResult({}),
+      "/tasks/complete": () => okResult({ completionId: "c1" }),
+      "/intent": () => errResult("EAS_DISABLED"),
+      "/tasks/claim": () => okResult({ rewardAmount: 5 }),
+      "/quests/run-1/complete": () => okResult({}),
+      "/reports": () => okResult({}),
+      "/quests": () => listWith([swapTask("t1")]),
+    });
+    const states: string[] = [];
+
+    await runDailyQuest(wallet, config, {
+      onProgress: async ({ actionTimeline }) => {
+        states.push(actionTimeline[0]?.status ?? "empty");
+      },
+    });
+
+    expect(states).toEqual(
+      expect.arrayContaining(["broadcasting", "submitted", "confirmed"]),
+    );
+    expect(states.indexOf("broadcasting")).toBeLessThan(
+      states.indexOf("submitted"),
+    );
   });
 
   it("does not guess an execution order when more than one candidate is safe", async () => {
@@ -758,6 +883,53 @@ describe("runDailyQuest", () => {
     expect(report.blockingCode).toBe("NOTHING_EXECUTABLE");
   });
 
+  it("does not consume a quest path when one task is executable but another needs owner funding", async () => {
+    observeCandidates.mockResolvedValue({
+      stateVersion: "s1",
+      blockNumber: "1",
+      balances: [
+        {
+          asset: "USDC",
+          tokenAddress: "0x0000000000000000000000000000000000000001",
+          decimals: 6,
+          raw: "1000000",
+          formatted: "1",
+        },
+      ],
+      candidates: [candidateFor("t1")],
+      ownerBlockers: [
+        {
+          taskId: "t2",
+          code: "OWNER_PREREQUISITE_UNAVAILABLE",
+          message: "The second task cannot be funded safely.",
+          deficits: [
+            {
+              asset: "USDC",
+              tokenAddress: "0x0000000000000000000000000000000000000001",
+              decimals: 6,
+              raw: "2000000",
+              formatted: "2",
+            },
+          ],
+        },
+      ],
+      fatalBlockers: [],
+    });
+    route({
+      "/reports": () => okResult({}),
+      "/quests": () => listWith([swapTask("t1"), swapTask("t2")]),
+    });
+
+    const result = await runDailyQuest(wallet, config, {});
+
+    expect(
+      call.mock.calls.filter(([path]) => String(path).includes("/start")),
+    ).toHaveLength(0);
+    expect(executeCandidate).not.toHaveBeenCalled();
+    expect(result.blockingReason).toContain("Exact shortfall: USDC 2");
+    expect(result.blockingReason).toContain("Fund 0xagent");
+  });
+
   it("sends a stable idempotency key per effect", async () => {
     offerCandidatesFor(["t1"]);
     route({
@@ -783,4 +955,45 @@ describe("runDailyQuest", () => {
     // Keyed on the hash so a retry settles the original rather than re-running.
     expect(complete.idempotencyKey).toBe(`complete:${HASH}`);
   });
+});
+
+it("reconciles a pending transaction before checking funding again", async () => {
+  route({
+    "/quests": () => listWith([swapTask("t1")]),
+    "/reports": () => okResult({}),
+  });
+  getTransactionReceipt.mockRejectedValueOnce(
+    new Error("Receipt not available"),
+  );
+  observeCandidates.mockResolvedValue({
+    stateVersion: "v",
+    blockNumber: "1",
+    balances: [],
+    candidates: [],
+    fatalBlockers: [],
+    ownerBlockers: [
+      {
+        taskId: "t1",
+        code: "INSUFFICIENT_ETH",
+        message: "Spent on pending transaction",
+      },
+    ],
+  });
+  const result = await runDailyQuest(wallet, config, {
+    runId: "run-1",
+    restoredTimeline: [
+      {
+        candidateId: "candidate",
+        actionName: "p2e_uniswap_swap",
+        purpose: "quest_task",
+        taskId: "t1",
+        status: "submitted",
+        txHash: HASH,
+      },
+    ],
+  });
+  expect(result.blockingCode).toBe("TX_CONFIRMATION_PENDING");
+  expect(getTransactionReceipt).toHaveBeenCalledWith({ hash: HASH });
+  expect(observeCandidates).not.toHaveBeenCalled();
+  expect(executeCandidate).not.toHaveBeenCalled();
 });

@@ -115,6 +115,7 @@ export const ethTransferAction: ActionDefinition<
   },
   async execute(ctx, input) {
     const parsed = ethTransferInputSchema.parse(input);
+    await ctx.onTransactionPrepared?.({ approvals: [] });
     const txHash = await ctx.wallet.sendTransaction({
       to: parsed.to as `0x${string}`,
       data: "0x",
@@ -231,6 +232,7 @@ export const erc20TransferAction: ActionDefinition<
   },
   async execute(ctx, input) {
     const parsed = erc20TransferInputSchema.parse(input);
+    await ctx.onTransactionPrepared?.({ approvals: [] });
     const txHash = await ctx.wallet.sendTransaction({
       to: parsed.tokenAddress as `0x${string}`,
       data: encodeFunctionData({

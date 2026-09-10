@@ -32,7 +32,7 @@ import { observeCandidates, executeCandidate } from "./candidates";
 import { actionByName, actionForTaskType } from "./actions/registry";
 import type { AgentWallet } from "./wallet";
 import type { RunnerConfig } from "./config";
-import type { ActionCandidate } from "./actions/types";
+import type { ActionCandidate, ActionContext } from "./actions/types";
 
 const getBlockNumber = jest.fn();
 
@@ -568,6 +568,30 @@ describe("executeCandidate", () => {
     expect(result.status).toBe("confirmed");
   });
 
+  it("does not downgrade a failed transaction checkpoint into a retryable action result", async () => {
+    execute.mockImplementation(async (context: ActionContext) => {
+      await context.onTransactionPrepared?.({ approvals: [] });
+      return {
+        status: "confirmed",
+        txHash: `0x${"11".repeat(32)}`,
+        approvals: [],
+        blockNumber: "1",
+      };
+    });
+
+    await expect(
+      executeCandidate({
+        candidate: candidate(),
+        expectedStateVersion: "s1",
+        wallet,
+        config,
+        onTransactionPrepared: async () => {
+          throw new Error("checkpoint unavailable");
+        },
+      }),
+    ).rejects.toThrow("checkpoint unavailable");
+  });
+
   it("refuses a candidate derived from older state", async () => {
     const result = await executeCandidate({
       candidate: candidate(),
@@ -645,5 +669,43 @@ describe("executeCandidate", () => {
 
     // An arbitrary recipient never reaches the wallet.
     expect(execute).not.toHaveBeenCalled();
+  });
+});
+
+it("retains the submitted hash when receipt confirmation times out", async () => {
+  const action = actionByName("p2e_uniswap_swap")!;
+  jest.spyOn(action, "analyze").mockResolvedValue(readyAnalysis() as never);
+  jest.spyOn(action, "execute").mockImplementation(async (ctx) => {
+    await ctx.onTransactionSubmitted?.({
+      txHash: `0x${"11".repeat(32)}`,
+      approvals: [],
+    });
+    throw new Error("Timed out while waiting for transaction receipt");
+  });
+  const submitted = jest.fn();
+  const result = await executeCandidate({
+    candidate: {
+      candidateId: `cand_${"a".repeat(32)}`,
+      actionName: "p2e_uniswap_swap",
+      actionVersion: 2,
+      purpose: { kind: "quest_task", taskId: "t1" },
+      input: { pair: "ETH_UP", direction: "A_TO_B", amountInRaw: "1000" },
+      analysis: readyAnalysis(),
+      stateVersion: "s1",
+      estimatedCostUsd: null,
+      usefulEffects: 1,
+      rank: 1,
+      explanation: "audit",
+      expiresAt: null,
+    } as ActionCandidate,
+    expectedStateVersion: "s1",
+    wallet,
+    config,
+    onTransactionSubmitted: submitted,
+  });
+  expect(submitted).toHaveBeenCalledTimes(1);
+  expect(result).toMatchObject({
+    status: "submitted",
+    txHash: `0x${"11".repeat(32)}`,
   });
 });

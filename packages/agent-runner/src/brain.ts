@@ -51,6 +51,7 @@ export interface ActionTimelineEntry {
   /** The task this served: completed by it, or unblocked by it. */
   taskId: string;
   status:
+    | "broadcasting"
     | "submitted"
     | "confirmed"
     | "reverted"

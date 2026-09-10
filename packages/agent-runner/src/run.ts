@@ -19,7 +19,11 @@ import {
   observeCandidates,
 } from "./candidates";
 import { actionForTaskType } from "./actions/registry";
-import { resultTxHash, type BoundAction } from "./actions/types";
+import {
+  actionResultSchema,
+  resultTxHash,
+  type BoundAction,
+} from "./actions/types";
 import type { AgentWallet } from "./wallet";
 import type { RunnerConfig } from "./config";
 
@@ -27,6 +31,7 @@ export interface RunOptions {
   runId?: string;
   dryRun?: boolean;
   restoredTimeline?: ActionTimelineEntry[];
+  maxStateChanges?: number;
   onProgress?(progress: {
     actionTimeline: ActionTimelineEntry[];
   }): Promise<void>;
@@ -241,7 +246,55 @@ export async function runDailyQuest(
     return finish();
   }
 
+  const preflightRemaining = async (
+    settledTaskIds: Set<string>,
+  ): Promise<boolean> => {
+    const preflightTasks = plan
+      .filter(
+        (step): step is Extract<PlannedTask, { kind: "execute" }> =>
+          step.kind === "execute" && !settledTaskIds.has(step.task.id),
+      )
+      .map((step) => ({
+        id: step.task.id,
+        title: step.title,
+        taskType: step.taskType,
+        taskConfig: (step.task.task_config ?? {}) as Record<string, unknown>,
+      }));
+
+    const preflight = await observeCandidates({
+      wallet,
+      config,
+      tasks: preflightTasks,
+      settledTaskIds,
+    });
+    if (preflight.fatalBlockers.length > 0) {
+      const blocker = preflight.fatalBlockers[0]!;
+      blockingCode = blocker.code;
+      blockingReason = `${blocker.message} The quest was not started.`;
+      return false;
+    }
+    if (preflight.ownerBlockers.length > 0) {
+      const blocker = preflight.ownerBlockers[0]!;
+      const balances = preflight.balances
+        .map((balance) => `${balance.asset} ${balance.formatted}`)
+        .join(", ");
+      const deficits = (blocker.deficits ?? [])
+        .map((deficit) => `${deficit.asset} ${deficit.formatted}`)
+        .join(", ");
+      blockingCode = blocker.code;
+      blockingReason = `${blocker.message}${deficits ? ` Exact shortfall: ${deficits}.` : ""} Current wallet balances: ${balances}. Fund ${wallet.address}, then explicitly retry.`;
+      ownerQuestions.push({
+        question: `Fund ${wallet.address}, then tell me to retry this quest.`,
+        blockedTaskId: blocker.taskId,
+      });
+      return false;
+    }
+
+    return true;
+  };
+
   if (options.dryRun) {
+    if (!(await preflightRemaining(new Set()))) return finish();
     for (const step of plan) {
       tasks.push(
         step.kind === "skip"
@@ -260,30 +313,6 @@ export async function runDailyQuest(
     blockingCode = "DRY_RUN";
     blockingReason =
       "Dry run completed without changing server or chain state.";
-    return finish();
-  }
-
-  const start = await track(
-    await session.call(`/api/agent/v1/quests/${runId}/start`, {
-      method: "POST",
-      idempotencyKey: `start:${runId}:${wallet.address}`,
-    }),
-  );
-  // Every failure blocks, including PATH_ALREADY_SELECTED: that code is raised
-  // only when the owner already claimed a *different* run in this alternative
-  // group today, so continuing would spend gas on a swap for a run they are
-  // not on. A restart of this same run does not raise it.
-  if (!start.ok) {
-    blockingCode = start.code;
-    blockingReason = `Could not start the run: ${start.message ?? start.code}`;
-    tasks.push({
-      taskId: "start",
-      title: "Start the quest",
-      taskType: "start",
-      status: "failed",
-      code: start.code,
-      detail: start.message,
-    });
     return finish();
   }
 
@@ -362,6 +391,23 @@ export async function runDailyQuest(
     );
   }
 
+  const uncertainBroadcast = timeline.find(
+    (entry) =>
+      entry.status === "broadcasting" &&
+      (entry.purpose === "prerequisite" || !settledTaskIds.has(entry.taskId)),
+  );
+  if (uncertainBroadcast) {
+    blockingCode = "OWNER_TRANSACTION_RECONCILIATION_REQUIRED";
+    blockingReason = `The agent prepared ${uncertainBroadcast.actionName}, but stopped before its transaction hash was durably recorded.`;
+    ownerQuestions.push({
+      question:
+        "Check the agent wallet's recent activity. Retry only if the prepared transaction was not broadcast.",
+      blockedTaskId: uncertainBroadcast.taskId,
+    });
+    await options.onProgress?.({ actionTimeline: [...timeline] });
+    return finish();
+  }
+
   for (const entry of timeline) {
     if (
       (entry.status !== "submitted" && entry.status !== "confirmed") ||
@@ -420,6 +466,32 @@ export async function runDailyQuest(
     settledTaskIds.add(entry.taskId);
   }
 
+  if (!(await preflightRemaining(settledTaskIds))) return finish();
+
+  const start = await track(
+    await session.call(`/api/agent/v1/quests/${runId}/start`, {
+      method: "POST",
+      idempotencyKey: `start:${runId}:${wallet.address}`,
+    }),
+  );
+  // Every failure blocks, including PATH_ALREADY_SELECTED: that code is raised
+  // only when the owner already claimed a *different* run in this alternative
+  // group today, so continuing would spend gas on a swap for a run they are
+  // not on. A restart of this same run does not raise it.
+  if (!start.ok) {
+    blockingCode = start.code;
+    blockingReason = `Could not start the run: ${start.message ?? start.code}`;
+    tasks.push({
+      taskId: "start",
+      title: "Start the quest",
+      taskType: "start",
+      status: "failed",
+      code: start.code,
+      detail: start.message,
+    });
+    return finish();
+  }
+
   // Read once, after the run is entered: it costs a paid query, and it is
   // context for the report rather than an input to any decision.
   let historyContext: Awaited<ReturnType<typeof fetchAgentHistory>> | undefined;
@@ -455,6 +527,7 @@ export async function runDailyQuest(
       ? null
       : await planAndExecute({
           config,
+          maxStateChanges: options.maxStateChanges ?? 1,
           tasks: candidateTasks,
           historyContext,
           observe: () =>
@@ -466,29 +539,107 @@ export async function runDailyQuest(
               rejectedCandidateIds,
             }),
           executeCandidate: async (candidate, expectedStateVersion) => {
-            let submittedIndex = -1;
-            const result = await executeBoundCandidate({
-              candidate,
-              expectedStateVersion,
-              wallet,
-              config,
-              onTransactionSubmitted: async ({ txHash }) => {
-                submittedIndex =
-                  timeline.push({
-                    candidateId: candidate.candidateId,
-                    actionName: candidate.actionName,
-                    purpose: candidate.purpose.kind,
-                    taskId:
-                      candidate.purpose.kind === "quest_task"
-                        ? candidate.purpose.taskId
-                        : candidate.purpose.forTaskId,
-                    status: "submitted",
-                    txHash,
-                  }) - 1;
-                await options.onProgress?.({ actionTimeline: [...timeline] });
-              },
-            });
+            let timelineIndex = -1;
+            const fundingSwaps = timeline.filter(
+              (entry) =>
+                entry.purpose === "prerequisite" &&
+                entry.actionName === "p2e_uniswap_swap" &&
+                (entry.status === "submitted" || entry.status === "confirmed"),
+            ).length;
+            let result =
+              candidate.purpose.kind === "prerequisite" &&
+              candidate.actionName === "p2e_uniswap_swap" &&
+              fundingSwaps >= (config.maxFundingSwaps ?? 20)
+                ? actionResultSchema.parse({
+                    status: "owner_required",
+                    code: "FUNDING_SWAP_LIMIT",
+                    message: `The run reached its ${config.maxFundingSwaps ?? 20}-swap preparation budget.`,
+                  })
+                : await executeBoundCandidate({
+                    candidate,
+                    expectedStateVersion,
+                    wallet,
+                    config,
+                    onTransactionPrepared: async () => {
+                      timelineIndex =
+                        timeline.push({
+                          candidateId: candidate.candidateId,
+                          actionName: candidate.actionName,
+                          purpose: candidate.purpose.kind,
+                          taskId:
+                            candidate.purpose.kind === "quest_task"
+                              ? candidate.purpose.taskId
+                              : candidate.purpose.forTaskId,
+                          status: "broadcasting",
+                        }) - 1;
+                      try {
+                        await options.onProgress?.({
+                          actionTimeline: [...timeline],
+                        });
+                      } catch (error) {
+                        timeline.splice(timelineIndex, 1);
+                        timelineIndex = -1;
+                        throw error;
+                      }
+                    },
+                    onApprovalTransaction: async ({ step, txHash }) => {
+                      const actionName = `approval:${step}`;
+                      const existing = timeline.findIndex(
+                        (entry) =>
+                          entry.candidateId === candidate.candidateId &&
+                          entry.actionName === actionName &&
+                          entry.status === "broadcasting",
+                      );
+                      const entry: ActionTimelineEntry = {
+                        candidateId: candidate.candidateId,
+                        actionName,
+                        purpose: "prerequisite",
+                        taskId:
+                          candidate.purpose.kind === "quest_task"
+                            ? candidate.purpose.taskId
+                            : candidate.purpose.forTaskId,
+                        status: txHash ? "submitted" : "broadcasting",
+                        ...(txHash ? { txHash } : {}),
+                      };
+                      if (existing >= 0) timeline[existing] = entry;
+                      else timeline.push(entry);
+                      await options.onProgress?.({
+                        actionTimeline: [...timeline],
+                      });
+                    },
+                    onTransactionSubmitted: async ({ txHash }) => {
+                      const submittedEntry: ActionTimelineEntry = {
+                        candidateId: candidate.candidateId,
+                        actionName: candidate.actionName,
+                        purpose: candidate.purpose.kind,
+                        taskId:
+                          candidate.purpose.kind === "quest_task"
+                            ? candidate.purpose.taskId
+                            : candidate.purpose.forTaskId,
+                        status: "submitted",
+                        txHash,
+                      };
+                      if (timelineIndex >= 0) {
+                        timeline[timelineIndex] = submittedEntry;
+                      } else {
+                        timelineIndex = timeline.push(submittedEntry) - 1;
+                      }
+                      await options.onProgress?.({
+                        actionTimeline: [...timeline],
+                      });
+                    },
+                  });
 
+            const prepared =
+              timelineIndex >= 0 ? timeline[timelineIndex] : undefined;
+            if (prepared?.status === "broadcasting" && !resultTxHash(result)) {
+              result = actionResultSchema.parse({
+                status: "owner_required",
+                code: "OWNER_TRANSACTION_RECONCILIATION_REQUIRED",
+                message:
+                  "The transaction may have been broadcast. Check wallet activity before retrying.",
+              });
+            }
             const txHash = resultTxHash(result);
             const entry = {
               candidateId: candidate.candidateId,
@@ -502,7 +653,11 @@ export async function runDailyQuest(
               ...(txHash ? { txHash } : {}),
               ...("message" in result ? { detail: result.message } : {}),
             } satisfies ActionTimelineEntry;
-            if (submittedIndex >= 0) timeline[submittedIndex] = entry;
+            if (timelineIndex >= 0)
+              timeline[timelineIndex] =
+                prepared?.status === "broadcasting" && !txHash
+                  ? prepared
+                  : entry;
             else timeline.push(entry);
             await options.onProgress?.({ actionTimeline: [...timeline] });
 
@@ -518,6 +673,7 @@ export async function runDailyQuest(
 
             // Only a quest task is submitted for verification. A prerequisite spends
             // gas to unblock a task and is never reported as completing one.
+            if (result.status === "submitted") return { candidate, result };
             const purpose = candidate.purpose;
             if (purpose.kind !== "quest_task") {
               return { candidate, result };

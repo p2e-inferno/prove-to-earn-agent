@@ -69,7 +69,7 @@ async function register(): Promise<void> {
       body: JSON.stringify({
         nonce: grantResponse.data.nonce,
         agentSignature,
-        label: config.agentName ?? process.env.AGENT_LABEL ?? "quest-runner",
+        label: process.env.AGENT_LABEL ?? "quest-runner",
       }),
     },
   ).then((r) => r.json());
@@ -126,6 +126,7 @@ async function work(): Promise<void> {
 
   const worker = new AgentWorker(wallet, config, {
     runId: process.env.AGENT_RUN_ID,
+    requiredExecutionMode: "scheduled",
   });
   const cycles = await worker.start();
 

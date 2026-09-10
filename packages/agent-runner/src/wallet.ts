@@ -130,8 +130,8 @@ export function createLocalWallet(config: RunnerConfig): AgentWallet {
 export async function createCdpWallet(
   config: RunnerConfig,
 ): Promise<AgentWallet> {
-  if (!config.agentName) {
-    throw new Error("AGENT_NAME is required for the CDP wallet provider");
+  if (!config.providerAccountName) {
+    throw new Error("A CDP provider account name is required");
   }
 
   const { CdpClient } = await import("@coinbase/cdp-sdk");
@@ -140,7 +140,7 @@ export async function createCdpWallet(
   // CDP_WALLET_SECRET unless passed explicitly.
   const cdp = new CdpClient();
   const cdpAccount = await cdp.evm.getOrCreateAccount({
-    name: config.agentName,
+    name: config.providerAccountName,
   });
 
   const viemAccount = toAccount(cdpAccount as never);

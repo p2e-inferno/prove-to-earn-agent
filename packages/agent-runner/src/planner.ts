@@ -41,6 +41,7 @@ export interface PlannerDeps {
     expectedStateVersion: string,
   ): Promise<PlannerExecution>;
   askOwner?(question: OwnerQuestion): Promise<void>;
+  maxStateChanges?: number;
 }
 
 export interface PlannerResult {
@@ -143,7 +144,9 @@ export async function planAndExecute(
   let ownerBlockers: CandidateObservation["ownerBlockers"] = [];
   let fatalBlockers: CandidateObservation["fatalBlockers"] = [];
   let stopCode: string | undefined;
+  let stopForOwner = false;
   const executedCandidateIds = new Set<string>();
+  const maxStateChanges = deps.maxStateChanges ?? 1;
   /** Tool calls the planner refused: an invented tool, bad args, a stale id. */
   let refusals = 0;
 
@@ -165,6 +168,7 @@ export async function planAndExecute(
     actions.push(execution);
     executedCandidateIds.add(candidate.candidateId);
     if (execution.result.status === "owner_required") {
+      stopForOwner = true;
       const question = {
         question: execution.result.message,
         blockedTaskId:
@@ -206,6 +210,11 @@ export async function planAndExecute(
         return;
       }
       await executeOne(observation.candidates[0]!, observation.stateVersion);
+      if (stopForOwner) return;
+      if (actions.length >= maxStateChanges) {
+        stopCode = "CYCLE_BOUND_REACHED";
+        return;
+      }
     }
     stopCode = "PLANNER_STEP_LIMIT";
   };
@@ -309,6 +318,9 @@ export async function planAndExecute(
             ok: execution.result.status === "confirmed",
             result: actionResultSchema.parse(execution.result),
           };
+          if (actions.length >= maxStateChanges) {
+            stopCode = "CYCLE_BOUND_REACHED";
+          }
         }
       }
     } else if (call.function.name === "ask_owner") {
@@ -343,6 +355,7 @@ export async function planAndExecute(
       tool_call_id: call.id,
       content: JSON.stringify(toolResult),
     });
+    if (stopForOwner || actions.length >= maxStateChanges) break;
   }
 
   return result();

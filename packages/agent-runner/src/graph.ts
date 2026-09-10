@@ -51,7 +51,7 @@ export async function fetchAgentHistory(
     querySubgraph(
       wallet,
       config,
-      config.graphSubgraphId,
+      config.graphUniswapSubgraphId,
       RECENT_SWAPS_QUERY,
       { origins: [address], first: HISTORY_LIMIT },
       track,
