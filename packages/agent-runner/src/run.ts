@@ -549,11 +549,11 @@ export async function runDailyQuest(
             let result =
               candidate.purpose.kind === "prerequisite" &&
               candidate.actionName === "p2e_uniswap_swap" &&
-              fundingSwaps >= (config.maxFundingSwaps ?? 20)
+              fundingSwaps >= (config.maxFundingSwaps ?? 10)
                 ? actionResultSchema.parse({
                     status: "owner_required",
                     code: "FUNDING_SWAP_LIMIT",
-                    message: `The run reached its ${config.maxFundingSwaps ?? 20}-swap preparation budget.`,
+                    message: `The run reached its ${config.maxFundingSwaps ?? 10}-swap preparation budget.`,
                   })
                 : await executeBoundCandidate({
                     candidate,
@@ -760,16 +760,20 @@ export async function runDailyQuest(
         (result) =>
           result.status !== "confirmed" && result.status !== "submitted",
       );
-    blockingCode ??=
-      planned?.ownerBlockers[0]?.code ??
-      planned?.fatalBlockers[0]?.code ??
-      planned?.stopCode ??
-      (actionFailure && "code" in actionFailure
-        ? actionFailure.code
-        : undefined) ??
-      stuck?.code;
-    blockingReason =
-      "Some tasks were not completed, so the quest was not finalized and no completion key was granted.";
+    // One ordered cause drives both fields. Resolved separately they drift, and a
+    // report reading FUNDING_SWAP_LIMIT above prose that mentions no limit sends
+    // the owner looking for a fault that is really a budget they chose.
+    const cause: { code?: string; message?: string; detail?: string } | undefined =
+      planned?.ownerBlockers[0] ??
+      planned?.fatalBlockers[0] ??
+      (planned?.stopCode ? { code: planned.stopCode } : undefined) ??
+      (actionFailure && "code" in actionFailure ? actionFailure : undefined) ??
+      stuck;
+    blockingCode ??= cause?.code;
+    const explained = cause?.message ?? cause?.detail;
+    blockingReason = explained
+      ? `${explained} The quest was not finalized and no completion key was granted.`
+      : "Some tasks were not completed, so the quest was not finalized and no completion key was granted.";
     return finish();
   }
 

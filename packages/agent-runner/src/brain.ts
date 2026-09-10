@@ -236,7 +236,7 @@ export async function narrateRun(
       messages,
       model: config.llmModel,
       temperature: 0.2,
-      maxTokens: 400,
+      maxTokens: 700,
       responseFormat: { type: "json_object" },
     });
 

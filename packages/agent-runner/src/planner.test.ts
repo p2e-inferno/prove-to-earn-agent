@@ -60,7 +60,8 @@ function observation(
   return {
     stateVersion: STATE,
     blockNumber: "1",
-    balances: [],
+    assetRequirements: { ETH: "0", USDC: "0", UP: "0", DG: "0" },
+  balances: [],
     candidates,
     ownerBlockers: [],
     fatalBlockers: [],

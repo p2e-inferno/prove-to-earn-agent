@@ -1,10 +1,25 @@
 import { formatEther, formatUnits, parseUnits } from "viem";
 import { priceFor } from "@/packages/agent-gateway/src/payments/pricing";
-import { readBalances, GAS_RESERVE_WEI } from "./balances";
+import { GAS_RESERVE_WEI } from "./balances";
 import { observeCandidates } from "./candidates";
-import { actionForTaskType } from "./actions/registry";
+import type { Asset } from "./actions/types";
 import type { AgentWallet } from "./wallet";
 import type { RunnerConfig } from "./config";
+
+/** A V3 router swap costs ~180k gas and an ERC-20 approve ~50k; this is either. */
+const GAS_PER_OPERATION = 250_000n;
+
+/** Absorbs a route changing between admission and execution. */
+const GAS_SAFETY_FACTOR = 2n;
+
+/** One swap and its approval close a shortfall; a second covers one reroute. */
+const HOPS_PER_SHORTFALL = 2n;
+
+/** quests.list is cached for DISCOVERY_TTL_MS, so a run pays it once per window. */
+const DISCOVERY_WINDOWS = 2n;
+
+/** Mirrors CLAIM_ATTEMPTS in run.ts: a reward claim can genuinely be paid for thrice. */
+const CLAIM_ATTEMPT_BUDGET = 3n;
 
 export async function checkAdmissionFunding(
   wallet: AgentWallet,
@@ -24,44 +39,54 @@ export async function checkAdmissionFunding(
     taskType: task.task_type,
     taskConfig: task.task_config,
   }));
-  const balances = await readBalances(wallet);
-  const gasPrice = await wallet.publicClient.getGasPrice();
-  const gasBudget =
-    gasPrice *
-      BigInt((tasks.length + (config.maxFundingSwaps ?? 20)) * 3) *
-      1_000_000n +
-    GAS_RESERVE_WEI;
+  // One observation answers every question this gate asks: it reads the wallet,
+  // analyses each task, and surfaces the blockers. Running its analyze pass a
+  // second time here cost an extra RPC round trip per task for no new fact.
+  const [observation, gasPrice] = await Promise.all([
+    observeCandidates({ wallet, config, tasks }),
+    wallet.publicClient.getGasPrice(),
+  ]);
+
+  // A task that can never run is not a funding problem; say so before asking
+  // the owner for money that would not fix it.
+  if (observation.fatalBlockers[0]) return observation.fatalBlockers[0].message;
+
+  const assets = ["ETH", "USDC", "UP", "DG"] as const;
+  const balances = Object.fromEntries(
+    observation.balances.map((balance) => [balance.asset, BigInt(balance.raw)]),
+  ) as Record<Asset, bigint>;
+
   const price = (id: string) => parseUnits(priceFor(id).slice(1), 6);
-  const cycles = BigInt(tasks.length + (config.maxFundingSwaps ?? 20) + 2);
+
+  // A funding swap is an on-chain action and never reaches the gateway, so the
+  // fee budget follows the quest's structure rather than any swap count.
   const apiBudget =
-    cycles * (price("quests.list") + price("quests.detail")) +
+    DISCOVERY_WINDOWS * price("quests.list") +
     price("quests.start") +
     price("quests.complete") +
     BigInt(tasks.length) *
-      (price("tasks.complete") +
-        price("tasks.claim.intent") +
-        price("tasks.claim"));
-  const required = { ETH: gasBudget, USDC: apiBudget, UP: 0n, DG: 0n };
-  for (const task of tasks) {
-    const action = actionForTaskType(task.taskType);
-    if (!action?.analyze || !action.parseTaskConfig)
-      return "A task is not supported by this agent.";
-    const analysis = await action.analyze(
-      {
-        wallet,
-        config,
-        purpose: { kind: "quest_task", taskId: task.id },
-        stateVersion: "admission",
-      },
-      action.parseTaskConfig(task.taskConfig),
-    );
-    for (const requirement of analysis.requirements) {
-      if (requirement.reference.kind === "asset")
-        required[requirement.reference.asset] += BigInt(
-          requirement.reference.requiredRaw,
-        );
-    }
-  }
+      (price("quests.detail") +
+        price("tasks.complete") +
+        CLAIM_ATTEMPT_BUDGET *
+          (price("tasks.claim.intent") + price("tasks.claim")));
+
+  const required = Object.fromEntries(
+    assets.map((asset) => [asset, BigInt(observation.assetRequirements[asset])]),
+  ) as Record<Asset, bigint>;
+  required.USDC += apiBudget;
+
+  // Gas scales with the operations this run actually needs: one per task, plus a
+  // bounded hop allowance for each asset the wallet is genuinely short of. The
+  // configured swap cap is a ceiling on behaviour and was never a forecast of it.
+  const shortfalls = assets.filter(
+    (asset) => required[asset] > balances[asset],
+  ).length;
+  const operations =
+    BigInt(tasks.length) + BigInt(shortfalls) * HOPS_PER_SHORTFALL;
+  required.ETH +=
+    gasPrice * operations * GAS_PER_OPERATION * GAS_SAFETY_FACTOR +
+    GAS_RESERVE_WEI;
+
   const deficits: string[] = [];
   if (balances.ETH < required.ETH)
     deficits.push(
@@ -72,10 +97,5 @@ export async function checkAdmissionFunding(
       `${formatUnits(required.USDC - balances.USDC, 6)} USDC including API payments`,
     );
   if (deficits.length) return `Funding required: ${deficits.join("; ")}.`;
-  const observation = await observeCandidates({ wallet, config, tasks });
-  return (
-    observation.fatalBlockers[0]?.message ??
-    observation.ownerBlockers[0]?.message ??
-    null
-  );
+  return observation.ownerBlockers[0]?.message ?? null;
 }

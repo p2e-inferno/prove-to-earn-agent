@@ -23,12 +23,32 @@ function validUrl(name: string, fallback?: string) {
   }
 }
 
+// NEXT_PUBLIC_BASE_MAINNET_RPC_URL is a keyless Alchemy base that the app's RPC
+// resolver joins with NEXT_PUBLIC_ALCHEMY_API_KEY, so alone it reaches nothing.
+function isKeylessProviderBase(raw: string) {
+  return /\.(?:alchemy\.com|infura\.io)\//i.test(raw) && raw.endsWith("/");
+}
+
+// Either route the agent stack resolves Base mainnet through counts: the
+// runner's AGENT_RPC_URL override, or the app's shared keyed-RPC resolution.
+function hasBaseMainnetRpc() {
+  if (validUrl("AGENT_RPC_URL")) return true;
+  if (present("NEXT_PUBLIC_ALCHEMY_API_KEY")) return true;
+  if (present("NEXT_PUBLIC_INFURA_API_KEY")) return true;
+  const custom = process.env.NEXT_PUBLIC_BASE_MAINNET_RPC_URL?.trim();
+  return Boolean(
+    custom &&
+    validUrl("NEXT_PUBLIC_BASE_MAINNET_RPC_URL") &&
+    !isKeylessProviderBase(custom),
+  );
+}
+
 export function validateAgentPlatformConfig() {
   let runnerValid = true;
   try {
     loadPlatformConfig({
       providerAccountName: "readiness",
-      maxFundingSwaps: 20,
+      maxFundingSwaps: 10,
     });
   } catch {
     runnerValid = false;
@@ -91,8 +111,8 @@ export function validateAgentPlatformConfig() {
       required: true,
     },
     {
-      name: "NEXT_PUBLIC_BASE_MAINNET_RPC_URL",
-      configured: validUrl("NEXT_PUBLIC_BASE_MAINNET_RPC_URL"),
+      name: "BASE_MAINNET_RPC",
+      configured: hasBaseMainnetRpc(),
       required: true,
     },
     {

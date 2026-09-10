@@ -34,6 +34,8 @@ export interface CandidateObservation {
   stateVersion: string;
   blockNumber: string;
   balances: ReturnType<typeof assetAmount>[];
+  /** Total raw amount each asset is required in, summed across every task analysed. */
+  assetRequirements: Record<Asset, string>;
   candidates: ActionCandidate[];
   ownerBlockers: Array<{
     taskId: string;
@@ -254,7 +256,7 @@ interface PrerequisiteArgs {
  * A step below the top is capped because each one spends real gas, and because
  * a protocol whose funding path loops would otherwise be free to do so.
  */
-const MAX_PREREQUISITE_DEPTH = 2;
+const MAX_PREREQUISITE_DEPTH = 10;
 
 export async function prerequisiteCandidates(
   args: PrerequisiteArgs,
@@ -437,6 +439,12 @@ export async function observeCandidates(args: {
   const candidates: ActionCandidate[] = [];
   const ownerBlockers: CandidateObservation["ownerBlockers"] = [];
   const fatalBlockers: CandidateObservation["fatalBlockers"] = [];
+  const assetRequirements: Record<Asset, bigint> = {
+    ETH: 0n,
+    USDC: 0n,
+    UP: 0n,
+    DG: 0n,
+  };
 
   for (const task of args.tasks) {
     if (args.settledTaskIds?.has(task.id)) continue;
@@ -527,6 +535,10 @@ export async function observeCandidates(args: {
     }
     let prerequisitesFound = 0;
     for (const requirement of analysis.requirements) {
+      if (requirement.reference.kind === "asset")
+        assetRequirements[requirement.reference.asset] += BigInt(
+          requirement.reference.requiredRaw,
+        );
       const prerequisites = await prerequisiteCandidates({
         wallet: args.wallet,
         config: args.config,
@@ -577,6 +589,12 @@ export async function observeCandidates(args: {
         tokenFor(asset),
       ),
     ),
+    assetRequirements: {
+      ETH: assetRequirements.ETH.toString(),
+      USDC: assetRequirements.USDC.toString(),
+      UP: assetRequirements.UP.toString(),
+      DG: assetRequirements.DG.toString(),
+    },
     candidates: rankCandidates(filtered),
     ownerBlockers,
     fatalBlockers,

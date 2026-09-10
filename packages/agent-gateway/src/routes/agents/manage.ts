@@ -36,7 +36,7 @@ const createSchema = z
     rewardWallet: z.string().refine(ethers.isAddress),
     capabilities: z.array(z.enum(capabilities)).min(1),
     templateIds: z.array(z.string().uuid()).max(100).default([]),
-    maxFundingSwaps: z.number().int().min(0).max(20).default(20),
+    maxFundingSwaps: z.number().int().min(0).max(20).default(10),
   })
   .strict();
 

@@ -103,7 +103,7 @@ export function loadConfig(): RunnerConfig {
     providerAccountName: process.env.AGENT_NAME?.trim() || null,
     agentPrivateKey: process.env.AGENT_PRIVATE_KEY?.trim() || null,
     chainId: Number(process.env.AGENT_CHAIN_ID || 8453),
-    maxFundingSwaps: Number(process.env.AGENT_MAX_FUNDING_SWAPS || 20),
+    maxFundingSwaps: Number(process.env.AGENT_MAX_FUNDING_SWAPS || 10),
   };
 
   if (walletProvider === "cdp" && !config.providerAccountName) {

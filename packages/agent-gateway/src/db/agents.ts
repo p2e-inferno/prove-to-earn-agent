@@ -76,7 +76,7 @@ function mapAgent(data: Record<string, unknown>): RegisteredAgent {
         : null,
     executionMode:
       data.execution_mode === "scheduled" ? "scheduled" : "owner_invoked",
-    maxFundingSwaps: Number(data.max_funding_swaps ?? 3),
+    maxFundingSwaps: Number(data.max_funding_swaps ?? 10),
     worldStatus: String(
       data.world_status ?? "not_started",
     ) as RegisteredAgent["worldStatus"],

@@ -28,6 +28,7 @@ jest.mock("./actions/vendor", () => ({
     qualifyingBuyForPoints(...args),
 }));
 
+import { GAS_RESERVE_WEI } from "./balances";
 import { observeCandidates, executeCandidate } from "./candidates";
 import { actionByName, actionForTaskType } from "./actions/registry";
 import type { AgentWallet } from "./wallet";
@@ -320,7 +321,7 @@ describe("observeCandidates", () => {
 
   it("keeps a gas reserve rather than spending the last of the ETH", async () => {
     readBalances.mockResolvedValue({
-      ETH: 50_000_000_000_000n,
+      ETH: GAS_RESERVE_WEI / 2n,
       USDC: 0n,
       UP: 0n,
       DG: 0n,

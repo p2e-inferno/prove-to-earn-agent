@@ -10,10 +10,10 @@ export type PriceTier = "T1" | "T2" | "T3" | "T4" | "free";
  */
 export const TIER_PRICE: Record<PriceTier, string> = {
   free: "$0",
-  T1: "$0.001",
-  T2: "$0.005",
-  T3: "$0.01",
-  T4: "$0.05",
+  T1: "$0.0001",
+  T2: "$0.0003",
+  T3: "$0.001",
+  T4: "$0.003",
 };
 
 export interface AgentRouteSpec {

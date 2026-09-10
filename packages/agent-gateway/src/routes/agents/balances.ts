@@ -1,13 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
-import {
-  createPublicClient,
-  formatEther,
-  formatUnits,
-  http,
-  isAddress,
-} from "viem";
+import { formatEther, formatUnits, isAddress } from "viem";
 import { base } from "viem/chains";
 import { ERC20_ABI } from "@/lib/blockchain/shared/abi-definitions";
+import { createPublicClientForNetwork } from "@/lib/blockchain/config/clients/public-client";
 import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
 import { findOwnedAgent } from "../../db/agents";
 import { agentError, agentOk } from "../../errors";
@@ -35,10 +30,7 @@ export const GET = createPairingRoute({
       return agentError(409, "AGENT_NOT_READY", "Agent wallet is not ready");
     }
 
-    const client = createPublicClient({
-      chain: base,
-      transport: http(process.env.NEXT_PUBLIC_BASE_MAINNET_RPC_URL),
-    });
+    const client = createPublicClientForNetwork({ chainId: base.id });
     const address = agent.agentWallet as `0x${string}`;
     const [eth, usdc] = await Promise.all([
       client.getBalance({ address }),

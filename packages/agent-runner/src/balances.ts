@@ -12,7 +12,7 @@ export interface WalletBalances {
 }
 
 /** Held back from every ETH-spending decision so the next tx can still be sent. */
-export const GAS_RESERVE_WEI = 100_000_000_000_000n;
+export const GAS_RESERVE_WEI = 5_000_000_000_000n;
 
 export function spendableEth(balance: bigint): bigint {
   return balance > GAS_RESERVE_WEI ? balance - GAS_RESERVE_WEI : 0n;
