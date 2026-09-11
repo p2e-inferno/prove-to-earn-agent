@@ -30,6 +30,9 @@ export interface AgentRouteSpec {
   capability: AgentCapability | null;
   tier: PriceTier;
   description: string;
+  request: string;
+  response: string;
+  overrides: string[];
 }
 
 export const AGENT_ROUTES: AgentRouteSpec[] = [
@@ -40,6 +43,9 @@ export const AGENT_ROUTES: AgentRouteSpec[] = [
     capability: "quests.start",
     tier: "free",
     description: "Acquire and checkpoint a durable quest execution",
+    request: "Path runId; JSON execution lease or checkpoint operation",
+    response: "Execution state, command state, pending decision, and version",
+    overrides: ["proceed", "retry", "finalize", "cancel"],
   },
   {
     id: "reports.write",
@@ -48,6 +54,9 @@ export const AGENT_ROUTES: AgentRouteSpec[] = [
     capability: null,
     tier: "free",
     description: "Publish a run report to the agent's owner",
+    request: "JSON AgentRunReportInput",
+    response: "Persisted report acknowledgement",
+    overrides: [],
   },
   {
     id: "balance.read",
@@ -56,6 +65,9 @@ export const AGENT_ROUTES: AgentRouteSpec[] = [
     capability: "quests.read",
     tier: "T1",
     description: "Owner xDG balance and bucket breakdown",
+    request: "No body",
+    response: "Owner xDG balance and bucket breakdown",
+    overrides: [],
   },
   {
     id: "quests.detail",
@@ -64,6 +76,20 @@ export const AGENT_ROUTES: AgentRouteSpec[] = [
     capability: "quests.read",
     tier: "T2",
     description: "One daily quest run with eligibility for the owner",
+    request: "Path runId",
+    response: "Quest run, task completions, and owner eligibility",
+    overrides: [],
+  },
+  {
+    id: "quests.assessment",
+    method: "GET",
+    path: "/api/agent/v1/quests/[runId]/assessment",
+    capability: "quests.read",
+    tier: "T3",
+    description: "Structured execution blockers, funding and cost assessment",
+    request: "Path runId",
+    response: "AdmissionAssessment for the agent execution wallet",
+    overrides: ["proceed", "cancel"],
   },
   {
     id: "quests.list",
@@ -72,6 +98,9 @@ export const AGENT_ROUTES: AgentRouteSpec[] = [
     capability: "quests.read",
     tier: "T3",
     description: "Today's daily quest runs with per-run eligibility",
+    request: "No body",
+    response: "Executable daily quest runs with per-run eligibility",
+    overrides: [],
   },
   {
     id: "quests.start",
@@ -80,6 +109,9 @@ export const AGENT_ROUTES: AgentRouteSpec[] = [
     capability: "quests.start",
     tier: "T3",
     description: "Enter a daily quest run and bind the execution wallet",
+    request: "Path runId; optional JSON start metadata",
+    response: "Started or resumed daily quest run",
+    overrides: [],
   },
   {
     id: "tasks.complete",
@@ -88,6 +120,9 @@ export const AGENT_ROUTES: AgentRouteSpec[] = [
     capability: "tasks.complete",
     tier: "T4",
     description: "Submit an on-chain transaction for task verification",
+    request: "JSON dailyQuestRunId, dailyQuestRunTaskId, and transactionHash",
+    response: "Verified task completion state",
+    overrides: [],
   },
   {
     id: "tasks.claim.intent",
@@ -99,6 +134,9 @@ export const AGENT_ROUTES: AgentRouteSpec[] = [
     tier: "T1",
     description:
       "The delegated attestation an agent must sign to claim a reward",
+    request: "Path completionId",
+    response: "Delegated attestation intent and typed data",
+    overrides: [],
   },
   {
     id: "tasks.claim",
@@ -107,6 +145,9 @@ export const AGENT_ROUTES: AgentRouteSpec[] = [
     capability: "tasks.claim",
     tier: "T4",
     description: "Claim a verified task reward with a delegated attestation",
+    request: "JSON completionId and attestationSignature",
+    response: "Reward claim state and awarded amount",
+    overrides: [],
   },
   {
     id: "quests.complete",
@@ -115,6 +156,9 @@ export const AGENT_ROUTES: AgentRouteSpec[] = [
     capability: "quests.complete",
     tier: "T4",
     description: "Finalize a run and grant the completion key to the owner",
+    request: "Path runId; JSON completion proof",
+    response: "Finalized run and completion-key transaction state",
+    overrides: [],
   },
 ];
 

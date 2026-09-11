@@ -6,6 +6,8 @@
   "types": "./src/index.ts",
   "sideEffects": false,
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@p2e/agent-contracts": "0.1.0",
     "@ethereum-attestation-service/eas-sdk": "^2.9.0",
     "@supabase/supabase-js": "^2.50.0",
     "@upstash/redis": "^1.37.0",
@@ -16,6 +18,7 @@
     "@x402/next": "^2.25.0",
     "ethers": "^6.15.0",
     "jose": "^6.0.12",
+    "json-canonicalize": "3.0.1",
     "@coinbase/cdp-sdk": "^1.55.0",
     "@x402/extensions": "^2.25.0"
   },

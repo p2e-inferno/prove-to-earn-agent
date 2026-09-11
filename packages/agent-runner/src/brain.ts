@@ -2,6 +2,11 @@ import { chatCompletion } from "@/lib/ai/client";
 import { z } from "zod";
 import type { AIConversationMessage } from "@/lib/ai/types";
 import type { RunnerConfig } from "./config";
+import type { AssetAmount } from "./actions/types";
+import type { RunSpend } from "./spend";
+import type { QuestCompletion } from "./report-schema";
+
+export type { RunSpend } from "./spend";
 
 export type TaskOutcome = {
   taskId: string;
@@ -15,6 +20,8 @@ export type TaskOutcome = {
   detail?: string;
   txHash?: string;
   rewardAmount?: number;
+  attestationUid?: string;
+  attestationUrl?: string;
 };
 
 export interface RunFacts {
@@ -25,6 +32,7 @@ export interface RunFacts {
   tasks: TaskOutcome[];
   questCompleted: boolean;
   keyTxHash?: string | null;
+  completion?: Omit<QuestCompletion, "txHash">;
   totalPaidCalls: number;
   discountedCalls: number;
   blockingReason?: string;
@@ -42,6 +50,7 @@ export interface RunFacts {
    * reported beside the tasks rather than hidden behind them.
    */
   actionTimeline?: ActionTimelineEntry[];
+  spend?: RunSpend;
 }
 
 export interface ActionTimelineEntry {
@@ -61,6 +70,10 @@ export interface ActionTimelineEntry {
     | "owner_required";
   txHash?: string;
   detail?: string;
+  principal?: AssetAmount;
+  /** What landed in the agent wallet; null once the receipt showed nothing. */
+  received?: AssetAmount | null;
+  gasCostRaw?: string;
 }
 
 export interface RunNarrative {

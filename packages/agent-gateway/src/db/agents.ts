@@ -20,7 +20,7 @@ export interface RegisteredAgent {
   walletProvider: "cdp" | "local";
   providerAccountName: string | null;
   executionMode: "owner_invoked" | "scheduled";
-  maxFundingSwaps: number;
+  maxFundingSwaps: number | null;
   worldStatus:
     | "not_started"
     | "in_progress"
@@ -76,7 +76,10 @@ function mapAgent(data: Record<string, unknown>): RegisteredAgent {
         : null,
     executionMode:
       data.execution_mode === "scheduled" ? "scheduled" : "owner_invoked",
-    maxFundingSwaps: Number(data.max_funding_swaps ?? 10),
+    maxFundingSwaps:
+      typeof data.max_funding_swaps === "number"
+        ? data.max_funding_swaps
+        : null,
     worldStatus: String(
       data.world_status ?? "not_started",
     ) as RegisteredAgent["worldStatus"],
@@ -254,7 +257,7 @@ export async function createPlatformAgent(input: {
   displayName: string;
   capabilities: AgentCapability[];
   templateIds: string[];
-  maxFundingSwaps: number;
+  maxFundingSwaps: number | null;
   ownerLimit: number;
 }): Promise<
   | { ok: true; agent: RegisteredAgent; capacity: AgentCapacity }
@@ -307,7 +310,7 @@ export async function createPlatformAgent(input: {
 export async function updatePlatformAgent(
   agentId: string,
   ownerUserId: string,
-  input: { displayName?: string; maxFundingSwaps?: number },
+  input: { displayName?: string; maxFundingSwaps?: number | null },
 ): Promise<RegisteredAgent | null> {
   const current = await findAgentById(agentId);
   if (
@@ -322,7 +325,10 @@ export async function updatePlatformAgent(
     p_agent_id: agentId,
     p_owner_user_id: ownerUserId,
     p_label: input.displayName ?? current.displayName,
-    p_max_funding_swaps: input.maxFundingSwaps ?? current.maxFundingSwaps,
+    p_max_funding_swaps:
+      input.maxFundingSwaps === undefined
+        ? current.maxFundingSwaps
+        : input.maxFundingSwaps,
     p_expected_version: current.lifecycleVersion,
   });
   if (error) throw error;

@@ -9,12 +9,7 @@ import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
 import type { ActionContext } from "./actions/types";
 import type { AgentWallet } from "./wallet";
 
-const MAX_UINT256 = (1n << 256n) - 1n;
-const MAX_UINT160 = (1n << 160n) - 1n;
-const MAX_UINT48 = (1n << 48n) - 1n;
-
-/** Re-approve before the allowance is close enough to expire mid-swap. */
-const EXPIRY_BUFFER_SECONDS = 3600;
+const PERMIT2_EXPIRY_SECONDS = 30 * 60;
 
 export interface ApprovalStep {
   step: "erc20-permit2" | "permit2-router" | "erc20-spender";
@@ -51,13 +46,16 @@ export async function ensureSwapApprovals(
   );
 
   if (erc20Allowance < amountIn) {
+    if (erc20Allowance > 0n) {
+      throw new Error("APPROVAL_RESET_REQUIRED");
+    }
     await onApproval?.({ step: "erc20-permit2" });
     const txHash = await wallet.sendTransaction({
       to: tokenIn,
       data: encodeFunctionData({
         abi: ERC20_ABI,
         functionName: "approve",
-        args: [permit2, MAX_UINT256],
+        args: [permit2, amountIn],
       }),
     });
     await onApproval?.({ step: "erc20-permit2", txHash });
@@ -77,17 +75,19 @@ export async function ensureSwapApprovals(
   );
 
   const nowSeconds = Math.floor(Date.now() / 1000);
-  const expiresSoon =
-    permit2Allowance.expiration < nowSeconds + EXPIRY_BUFFER_SECONDS;
+  const expiresSoon = permit2Allowance.expiration < nowSeconds + 60;
 
   if (permit2Allowance.amount < amountIn || expiresSoon) {
+    if (amountIn >= 1n << 160n) {
+      throw new Error("APPROVAL_AMOUNT_OUT_OF_RANGE");
+    }
     await onApproval?.({ step: "permit2-router" });
     const txHash = await wallet.sendTransaction({
       to: permit2,
       data: encodeFunctionData({
         abi: PERMIT2_ABI,
         functionName: "approve",
-        args: [tokenIn, router, MAX_UINT160, Number(MAX_UINT48)],
+        args: [tokenIn, router, amountIn, nowSeconds + PERMIT2_EXPIRY_SECONDS],
       }),
     });
     await onApproval?.({ step: "permit2-router", txHash });
@@ -122,6 +122,9 @@ export async function ensureErc20Allowance(
   })) as bigint;
 
   if (allowance >= amount) return [];
+  if (allowance > 0n) {
+    throw new Error("APPROVAL_RESET_REQUIRED");
+  }
 
   await onApproval?.({ step: "erc20-spender" });
   const txHash = await wallet.sendTransaction({
@@ -129,7 +132,7 @@ export async function ensureErc20Allowance(
     data: encodeFunctionData({
       abi: ERC20_ABI,
       functionName: "approve",
-      args: [spender, MAX_UINT256],
+        args: [spender, amount],
     }),
   });
   await onApproval?.({ step: "erc20-spender", txHash });

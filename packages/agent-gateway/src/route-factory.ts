@@ -156,6 +156,7 @@ export function createAgentRoute(options: CreateAgentRouteOptions) {
     throw new Error("Paid mutations require idempotency");
   const isMutation = spec.method !== "GET";
   const isFree = spec.tier === "free";
+  const requiresIdempotency = isMutation || !isFree;
 
   // Built on first request: Next collects route config at build time, and
   // resolving payment env vars there would fail the build without them.
@@ -340,7 +341,7 @@ export function createAgentRoute(options: CreateAgentRouteOptions) {
 
     let identity: RequestIdentity | null = null;
 
-    if (isMutation && options.idempotency !== false) {
+    if (requiresIdempotency && options.idempotency !== false) {
       const idempotencyKey = req.headers.get("idempotency-key");
       if (!isValidIdempotencyKey(idempotencyKey)) {
         return agentError(

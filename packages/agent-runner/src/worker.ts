@@ -3,8 +3,10 @@ import { z } from "zod";
 import { AgentSession } from "./session";
 import { assertAgentNetwork } from "./network";
 import { runDailyQuest, type RunReport } from "./run";
+import { parseRunSpend } from "./spend";
 import type { ActionTimelineEntry } from "./brain";
-import type { AgentWallet } from "./wallet";
+import type { AgentWallet, TransactionLifecycle } from "./wallet";
+import type { X402PaymentLifecycle } from "./paid-fetch";
 import type { RunnerConfig } from "./config";
 
 /** Immediate in-process retries before the failure is persisted for later. */
@@ -73,6 +75,18 @@ export interface WorkerOptions {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   requiredExecutionMode?: "owner_invoked" | "scheduled";
+  decisionAuthority?: "platform_chat" | "delegated_client";
+  commandId?: string;
+  transactionLifecycle?(input: {
+    candidate: import("./actions/types").ActionCandidate;
+    transactionIndex: number;
+    executionId: string;
+    delegatedSelection: {
+      frameId: string;
+      fingerprint: string;
+    };
+  }): TransactionLifecycle;
+  paymentLifecycle?(executionId: string): X402PaymentLifecycle;
 }
 
 export interface WorkerCycle {
@@ -122,7 +136,7 @@ export function classifyFailure(code: string | undefined): FailureClass {
     return "time_dependent";
   }
   if (
-    /KEYHOLDER|OWNER|SELECTION_REQUIRED|CHECKIN_NOT_FOUND|ADDRESS_MISMATCH|INSUFFICIENT_(?:FUNDS|UP|DG|USDC|ETH)|TRIAL_EXHAUSTED|FUNDING|NOT_OWNED/.test(
+    /KEYHOLDER|OWNER|SELECTION_REQUIRED|CHECKIN_NOT_FOUND|ADDRESS_MISMATCH|INSUFFICIENT_(?:FUNDS|UP|DG|USDC|ETH)|TRIAL_EXHAUSTED|FUNDING|NOT_OWNED|PAYMENT_RECONCILIATION/.test(
       normalized,
     )
   ) {
@@ -339,10 +353,15 @@ export class AgentWorker {
     const acquired = await this.acquire(runId);
     if ("outcome" in acquired) return acquired;
     const lease = acquired;
+    if (this.options.paymentLifecycle) {
+      this.session.setPaymentLifecycle(
+        this.options.paymentLifecycle(lease.executionId),
+      );
+    }
 
     // Consumed here, not carried forward: an answer applies to the attempt it
     // unblocked, and leaving it in the checkpoint would replay it every cycle.
-    const { ownerResolution, ...carried } = lease.checkpoint;
+    const { ownerResolution, delegatedSelection, ...carried } = lease.checkpoint;
     if (ownerResolution === "retry" && Array.isArray(carried.actionTimeline)) {
       carried.actionTimeline = (
         carried.actionTimeline as ActionTimelineEntry[]
@@ -382,7 +401,38 @@ export class AgentWorker {
             restoredTimeline: Array.isArray(carried.actionTimeline)
               ? (carried.actionTimeline as ActionTimelineEntry[])
               : [],
-            onProgress: async ({ actionTimeline }) => {
+            restoredSpend: parseRunSpend(carried.spend) ?? undefined,
+            decisionAuthority: this.options.decisionAuthority,
+            ...(this.options.paymentLifecycle ? { session: this.session } : {}),
+            ...(delegatedSelection && typeof delegatedSelection === "object"
+              ? {
+                  delegatedSelection: delegatedSelection as {
+                    candidateId: string;
+                    candidateStateVersion: string;
+                    fingerprint: string;
+                  },
+                }
+              : {}),
+            ...(this.options.transactionLifecycle &&
+            delegatedSelection &&
+            typeof delegatedSelection === "object"
+              ? {
+                  transactionLifecycle: (
+                    candidate: import("./actions/types").ActionCandidate,
+                    transactionIndex: number,
+                  ) =>
+                    this.options.transactionLifecycle!({
+                      candidate,
+                      transactionIndex,
+                      executionId: lease.executionId,
+                      delegatedSelection: delegatedSelection as {
+                        frameId: string;
+                        fingerprint: string;
+                      },
+                    }),
+                }
+              : {}),
+            onProgress: async ({ actionTimeline, spend }) => {
               const retainKnownHash = () => {
                 if (actionTimeline.at(-1)?.txHash) {
                   carried.actionTimeline = actionTimeline;
@@ -392,7 +442,7 @@ export class AgentWorker {
               try {
                 saved = await this.checkpoint(runId, lease, {
                   status: "running",
-                  checkpoint: { ...carried, actionTimeline },
+                  checkpoint: { ...carried, actionTimeline, spend },
                 });
               } catch (error) {
                 retainKnownHash();
@@ -403,6 +453,7 @@ export class AgentWorker {
                 throw new Error("Transaction checkpoint was not saved");
               }
               carried.actionTimeline = actionTimeline;
+              carried.spend = spend;
             },
           });
           break;
@@ -505,6 +556,27 @@ export class AgentWorker {
                 (this.config.claimFinalizationBufferSeconds ?? 120) * 1000,
             ).toISOString()
           : null;
+      const frameId = report.decisionFrameDraft ? randomUUID() : null;
+      const expectedExecutionVersion = lease.stateVersion + 1;
+      const frameCandidates = report.decisionFrameDraft?.candidates.map(
+        (candidate) => ({
+          candidateId: candidate.candidateId,
+          frameId,
+          expectedExecutionVersion,
+          stateVersion: candidate.stateVersion,
+          consequence: candidate.consequence,
+          fingerprint: candidate.fingerprint,
+          expiresAt: candidate.expiresAt,
+          description: candidate.description,
+        }),
+      );
+      const frameExpiresAt = frameCandidates?.reduce(
+        (earliest, candidate) =>
+          Date.parse(candidate.expiresAt) < Date.parse(earliest)
+            ? candidate.expiresAt
+            : earliest,
+        frameCandidates[0]?.expiresAt ?? new Date(this.now()).toISOString(),
+      );
       await this.checkpoint(runId, lease, {
         status,
         checkpoint,
@@ -514,7 +586,18 @@ export class AgentWorker {
             : null,
         pendingDecision:
           status === "decision_required"
-            ? {
+            ? report.decisionFrameDraft && frameId
+              ? {
+                  version: 1,
+                  kind: "action_selection",
+                  frameId,
+                  commandId: this.options.commandId,
+                  executionId: lease.executionId,
+                  expectedExecutionVersion,
+                  candidates: frameCandidates,
+                  expiresAt: frameExpiresAt,
+                }
+              : {
                 // The resolver matches on this id, so a decision written
                 // without one could never be answered by its owner.
                 id: randomUUID(),
@@ -526,9 +609,9 @@ export class AgentWorker {
                 options: rewardDecision
                   ? ["retry", "finalize"]
                   : ["retry", "cancel"],
-              }
+                }
             : null,
-        decisionDeadline,
+        decisionDeadline: frameExpiresAt ?? decisionDeadline,
         lastError: {
           code: report.blockingCode ?? "UNKNOWN",
           detail: report.blockingReason ?? null,

@@ -1,4 +1,4 @@
-import { checkAdmissionFunding } from "./admission";
+import { assessAdmission } from "./admission";
 import type { Asset } from "./actions/types";
 import type { AgentWallet } from "./wallet";
 import type { RunnerConfig } from "./config";
@@ -47,6 +47,8 @@ function observation(input: {
 }
 
 const wallet = {
+  address: "0x1111111111111111111111111111111111111111",
+  caip2: "eip155:8453",
   publicClient: { getGasPrice: jest.fn(async () => 1000000n) },
 } as unknown as AgentWallet;
 const config = { maxFundingSwaps: 0 } as RunnerConfig;
@@ -63,15 +65,26 @@ beforeEach(() => {
 
 it("pauses before paid discovery when the wallet has no API funds", async () => {
   observe.mockResolvedValue(observation({ balances: { USDC: 0n } }));
-  expect(await checkAdmissionFunding(wallet, config, run)).toContain(
-    "USDC including API payments",
+  const assessment = await assessAdmission(wallet, config, run);
+  expect(assessment.blockers).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        class: "funding",
+        code: "INSUFFICIENT_FUNDING",
+      }),
+    ]),
   );
+  expect(assessment.funding.deficits).toEqual(
+    expect.arrayContaining([expect.objectContaining({ asset: "USDC" })]),
+  );
+  expect(assessment.overridable).toBe(true);
 });
 
 it("requires gas even for a token-funded task", async () => {
   observe.mockResolvedValue(observation({ balances: { ETH: 0n } }));
-  expect(await checkAdmissionFunding(wallet, config, run)).toContain(
-    "ETH including the gas reserve",
+  const assessment = await assessAdmission(wallet, config, run);
+  expect(assessment.blockers).toEqual(
+    expect.arrayContaining([expect.objectContaining({ class: "funding" })]),
   );
 });
 
@@ -79,30 +92,36 @@ it("adds combined task spending to the API reserve", async () => {
   observe.mockResolvedValue(
     observation({ requirements: { USDC: "120000000" } }),
   );
-  expect(
-    await checkAdmissionFunding(wallet, config, {
-      daily_quest_run_tasks: [
-        ...run.daily_quest_run_tasks,
-        ...run.daily_quest_run_tasks,
-      ],
-    }),
-  ).toContain("Funding required");
+  const assessment = await assessAdmission(wallet, config, {
+    daily_quest_run_tasks: [
+      ...run.daily_quest_run_tasks,
+      ...run.daily_quest_run_tasks,
+    ],
+  });
+  expect(assessment.funding.deficits).toEqual(
+    expect.arrayContaining([expect.objectContaining({ asset: "USDC" })]),
+  );
 });
 
 it("admits funded tasks after candidate analysis", async () => {
-  expect(await checkAdmissionFunding(wallet, config, run)).toBeNull();
+  expect(await assessAdmission(wallet, config, run)).toMatchObject({
+    admissible: true,
+    overridable: false,
+    blockers: [],
+    economics: { method: "heuristic" },
+  });
   expect(observe).toHaveBeenCalled();
 });
 
 it("propagates RPC outages instead of admitting an unknown balance", async () => {
   observe.mockRejectedValue(new Error("RPC unavailable"));
-  await expect(checkAdmissionFunding(wallet, config, run)).rejects.toThrow(
+  await expect(assessAdmission(wallet, config, run)).rejects.toThrow(
     "RPC unavailable",
   );
 });
 
 it("analyses the run once rather than twice per gate", async () => {
-  await checkAdmissionFunding(wallet, config, run);
+  await assessAdmission(wallet, config, run);
   expect(observe).toHaveBeenCalledTimes(1);
 });
 
@@ -115,18 +134,40 @@ it("reports an unrunnable task ahead of any funding shortfall", async () => {
       ],
     }),
   );
-  expect(await checkAdmissionFunding(wallet, config, run)).toBe("Wrong chain.");
+  expect(await assessAdmission(wallet, config, run)).toMatchObject({
+    admissible: false,
+    overridable: false,
+    blockers: [
+      {
+        class: "invariant",
+        code: "UNSUPPORTED_CHAIN",
+        message: "Wrong chain.",
+      },
+    ],
+  });
 });
 
 it("surfaces an owner blocker once funding is sufficient", async () => {
   observe.mockResolvedValue(
     observation({
       ownerBlockers: [
-        { taskId: "task", code: "OWNER_ACTION_REQUIRED", message: "Do it in the app." },
+        {
+          taskId: "task",
+          code: "OWNER_ACTION_REQUIRED",
+          message: "Do it in the app.",
+        },
       ],
     }),
   );
-  expect(await checkAdmissionFunding(wallet, config, run)).toBe(
-    "Do it in the app.",
-  );
+  expect(await assessAdmission(wallet, config, run)).toMatchObject({
+    admissible: false,
+    overridable: false,
+    blockers: [
+      {
+        class: "owner",
+        code: "OWNER_ACTION_REQUIRED",
+        message: "Do it in the app.",
+      },
+    ],
+  });
 });

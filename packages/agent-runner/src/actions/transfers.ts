@@ -3,9 +3,12 @@ import { z } from "zod";
 import { ERC20_ABI } from "@/lib/blockchain/shared/abi-definitions";
 import {
   actionAnalysisSchema,
+  actionEconomics,
   actionResultSchema,
+  actionValue,
   assetAmount,
   confirmedResult,
+  estimateActionGas,
   observedQuote,
   type ActionDefinition,
   type Asset,
@@ -75,12 +78,23 @@ export const ethTransferAction: ActionDefinition<
   },
   async analyze(ctx, input) {
     const parsed = ethTransferInputSchema.parse(input);
-    const [available, blockNumber] = await Promise.all([
+    const transaction = {
+      to: parsed.to as `0x${string}`,
+      data: "0x" as const,
+      value: BigInt(parsed.valueRaw),
+    };
+    const [available, blockNumber, gas] = await Promise.all([
       ctx.wallet.publicClient.getBalance({ address: ctx.wallet.address }),
       ctx.wallet.publicClient.getBlockNumber(),
+      estimateActionGas(ctx.wallet, transaction),
     ]);
     const required = BigInt(parsed.valueRaw);
-    const spendable = spendableEth(available);
+    const spendable = spendableEth(
+      available,
+      ctx.config.minNativeReserveRaw
+        ? BigInt(ctx.config.minNativeReserveRaw)
+        : undefined,
+    ).spendable;
     const deficit = required > spendable ? required - spendable : 0n;
     return actionAnalysisSchema.parse({
       executableNow: deficit === 0n,
@@ -109,7 +123,11 @@ export const ethTransferAction: ActionDefinition<
               },
             ]
           : [],
-      gasEstimateRaw: null,
+      gasEstimateRaw: gas.estimateRaw,
+      economics: actionEconomics(
+        gas,
+        actionValue(assetAmount("ETH", required, 18, null)),
+      ),
       quote: observedQuote("task_config", blockNumber),
     });
   },
@@ -174,7 +192,12 @@ export const erc20TransferAction: ActionDefinition<
   },
   async analyze(ctx, input) {
     const parsed = erc20TransferInputSchema.parse(input);
-    const [available, blockNumber] = await Promise.all([
+    const transferData = encodeFunctionData({
+      abi: ERC20_ABI,
+      functionName: "transfer",
+      args: [parsed.to as `0x${string}`, BigInt(parsed.amountRaw)],
+    });
+    const [available, blockNumber, gas] = await Promise.all([
       ctx.wallet.publicClient.readContract({
         address: parsed.tokenAddress as `0x${string}`,
         abi: ERC20_ABI,
@@ -182,6 +205,10 @@ export const erc20TransferAction: ActionDefinition<
         args: [ctx.wallet.address],
       }) as Promise<bigint>,
       ctx.wallet.publicClient.getBlockNumber(),
+      estimateActionGas(ctx.wallet, {
+        to: parsed.tokenAddress as `0x${string}`,
+        data: transferData,
+      }),
     ]);
     const required = BigInt(parsed.amountRaw);
     const deficit = required > available ? required - available : 0n;
@@ -226,7 +253,18 @@ export const erc20TransferAction: ActionDefinition<
               },
             ]
           : [],
-      gasEstimateRaw: null,
+      gasEstimateRaw: gas.estimateRaw,
+      economics: actionEconomics(
+        gas,
+        actionValue(
+          assetAmount(
+            parsed.asset,
+            required,
+            parsed.decimals,
+            parsed.tokenAddress as `0x${string}`,
+          ),
+        ),
+      ),
       quote: observedQuote("task_config", blockNumber),
     });
   },

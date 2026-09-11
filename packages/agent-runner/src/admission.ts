@@ -1,65 +1,110 @@
-import { formatEther, formatUnits, parseUnits } from "viem";
+import { formatUnits, parseUnits } from "viem";
+import { z } from "zod";
+import { AGENT_REASON_CODES } from "@/packages/agent-gateway/src/codes";
 import { priceFor } from "@/packages/agent-gateway/src/payments/pricing";
 import { GAS_RESERVE_WEI } from "./balances";
 import { observeCandidates } from "./candidates";
-import type { Asset } from "./actions/types";
-import type { AgentWallet } from "./wallet";
+import {
+  assetAmount,
+  type Asset,
+  type AssetAmount,
+  type ReadOnlyAgentWallet,
+} from "./actions/types";
 import type { RunnerConfig } from "./config";
 
-/** A V3 router swap costs ~180k gas and an ERC-20 approve ~50k; this is either. */
 const GAS_PER_OPERATION = 250_000n;
-
-/** Absorbs a route changing between admission and execution. */
 const GAS_SAFETY_FACTOR = 2n;
-
-/** One swap and its approval close a shortfall; a second covers one reroute. */
 const HOPS_PER_SHORTFALL = 2n;
-
-/** quests.list is cached for DISCOVERY_TTL_MS, so a run pays it once per window. */
 const DISCOVERY_WINDOWS = 2n;
-
-/** Mirrors CLAIM_ATTEMPTS in run.ts: a reward claim can genuinely be paid for thrice. */
 const CLAIM_ATTEMPT_BUDGET = 3n;
 
-export async function checkAdmissionFunding(
-  wallet: AgentWallet,
+const taskSchema = z
+  .object({
+    id: z.string().min(1),
+    title: z.string().default("Quest task"),
+    task_type: z.string().min(1),
+    task_config: z.record(z.unknown()),
+  })
+  .passthrough();
+
+export interface AdmissionBlocker {
+  class: "invariant" | "owner" | "funding";
+  code: string;
+  message: string;
+  taskId?: string;
+}
+
+export interface AdmissionAssessment {
+  agentWallet: string;
+  admissible: boolean;
+  overridable: boolean;
+  blockers: AdmissionBlocker[];
+  funding: {
+    required: AssetAmount[];
+    held: AssetAmount[];
+    deficits: AssetAmount[];
+  };
+  economics: {
+    apiBudgetUsd: string;
+    gasBudgetRaw: string;
+    method: "heuristic" | "measured";
+  };
+  stateVersion: string;
+}
+
+export function blockedAdmission(
+  walletAddress: string,
+  blocker: Omit<AdmissionBlocker, "class"> & {
+    class?: AdmissionBlocker["class"];
+  },
+): AdmissionAssessment {
+  return {
+    agentWallet: walletAddress.toLowerCase(),
+    admissible: false,
+    overridable: false,
+    blockers: [{ class: blocker.class ?? "invariant", ...blocker }],
+    funding: { required: [], held: [], deficits: [] },
+    economics: {
+      apiBudgetUsd: "0",
+      gasBudgetRaw: "0",
+      method: "heuristic",
+    },
+    stateVersion: "unavailable",
+  };
+}
+
+function taskList(run: Record<string, unknown>) {
+  return z
+    .array(taskSchema)
+    .min(1)
+    .parse(run.daily_quest_run_tasks)
+    .map((task) => ({
+      id: task.id,
+      title: task.title,
+      taskType: task.task_type,
+      taskConfig: task.task_config,
+    }));
+}
+
+export async function assessAdmission(
+  wallet: ReadOnlyAgentWallet,
   config: RunnerConfig,
   run: Record<string, unknown>,
-): Promise<string | null> {
-  const tasks = (
-    run.daily_quest_run_tasks as Array<{
-      id: string;
-      title: string;
-      task_type: string;
-      task_config: Record<string, unknown>;
-    }>
-  ).map((task) => ({
-    id: task.id,
-    title: task.title,
-    taskType: task.task_type,
-    taskConfig: task.task_config,
-  }));
-  // One observation answers every question this gate asks: it reads the wallet,
-  // analyses each task, and surfaces the blockers. Running its analyze pass a
-  // second time here cost an extra RPC round trip per task for no new fact.
+): Promise<AdmissionAssessment> {
+  const tasks = taskList(run);
   const [observation, gasPrice] = await Promise.all([
     observeCandidates({ wallet, config, tasks }),
     wallet.publicClient.getGasPrice(),
   ]);
 
-  // A task that can never run is not a funding problem; say so before asking
-  // the owner for money that would not fix it.
-  if (observation.fatalBlockers[0]) return observation.fatalBlockers[0].message;
-
   const assets = ["ETH", "USDC", "UP", "DG"] as const;
-  const balances = Object.fromEntries(
-    observation.balances.map((balance) => [balance.asset, BigInt(balance.raw)]),
+  const heldByAsset = Object.fromEntries(
+    observation.balances.map((balance) => [balance.asset, balance]),
+  ) as Record<Asset, AssetAmount>;
+  const heldRaw = Object.fromEntries(
+    assets.map((asset) => [asset, BigInt(heldByAsset[asset].raw)]),
   ) as Record<Asset, bigint>;
-
   const price = (id: string) => parseUnits(priceFor(id).slice(1), 6);
-
-  // A funding swap is an on-chain action and never reaches the gateway, so the
-  // fee budget follows the quest's structure rather than any swap count.
   const apiBudget =
     DISCOVERY_WINDOWS * price("quests.list") +
     price("quests.start") +
@@ -70,32 +115,98 @@ export async function checkAdmissionFunding(
         CLAIM_ATTEMPT_BUDGET *
           (price("tasks.claim.intent") + price("tasks.claim")));
 
-  const required = Object.fromEntries(
-    assets.map((asset) => [asset, BigInt(observation.assetRequirements[asset])]),
+  const requiredRaw = Object.fromEntries(
+    assets.map((asset) => [
+      asset,
+      BigInt(observation.assetRequirements[asset]),
+    ]),
   ) as Record<Asset, bigint>;
-  required.USDC += apiBudget;
-
-  // Gas scales with the operations this run actually needs: one per task, plus a
-  // bounded hop allowance for each asset the wallet is genuinely short of. The
-  // configured swap cap is a ceiling on behaviour and was never a forecast of it.
+  requiredRaw.USDC += apiBudget;
   const shortfalls = assets.filter(
-    (asset) => required[asset] > balances[asset],
+    (asset) => requiredRaw[asset] > heldRaw[asset],
   ).length;
   const operations =
     BigInt(tasks.length) + BigInt(shortfalls) * HOPS_PER_SHORTFALL;
-  required.ETH +=
-    gasPrice * operations * GAS_PER_OPERATION * GAS_SAFETY_FACTOR +
-    GAS_RESERVE_WEI;
+  const gasBudget =
+    gasPrice * operations * GAS_PER_OPERATION * GAS_SAFETY_FACTOR;
+  requiredRaw.ETH += gasBudget + GAS_RESERVE_WEI;
 
-  const deficits: string[] = [];
-  if (balances.ETH < required.ETH)
-    deficits.push(
-      `${formatEther(required.ETH - balances.ETH)} ETH including the gas reserve`,
-    );
-  if (balances.USDC < required.USDC)
-    deficits.push(
-      `${formatUnits(required.USDC - balances.USDC, 6)} USDC including API payments`,
-    );
-  if (deficits.length) return `Funding required: ${deficits.join("; ")}.`;
-  return observation.ownerBlockers[0]?.message ?? null;
+  const required = assets.map((asset) =>
+    assetAmount(
+      asset,
+      requiredRaw[asset],
+      heldByAsset[asset].decimals,
+      heldByAsset[asset].tokenAddress as `0x${string}` | null,
+    ),
+  );
+  const deficits = assets
+    .map((asset) => {
+      const raw =
+        requiredRaw[asset] > heldRaw[asset]
+          ? requiredRaw[asset] - heldRaw[asset]
+          : 0n;
+      return assetAmount(
+        asset,
+        raw,
+        heldByAsset[asset].decimals,
+        heldByAsset[asset].tokenAddress as `0x${string}` | null,
+      );
+    })
+    .filter((amount) => amount.raw !== "0");
+
+  const blockers: AdmissionBlocker[] = [
+    ...observation.fatalBlockers.map((blocker) => ({
+      class: "invariant" as const,
+      code: blocker.code,
+      message: blocker.message,
+      taskId: blocker.taskId,
+    })),
+    ...observation.ownerBlockers.map((blocker) => ({
+      class: "owner" as const,
+      code: blocker.code,
+      message: blocker.message,
+      taskId: blocker.taskId,
+    })),
+  ];
+
+  if (observation.fatalBlockers.length === 0) {
+    for (const asset of ["ETH", "USDC"] as const) {
+      if (requiredRaw[asset] <= heldRaw[asset]) continue;
+      const deficit = requiredRaw[asset] - heldRaw[asset];
+      const formatted = assetAmount(
+        asset,
+        deficit,
+        heldByAsset[asset].decimals,
+        heldByAsset[asset].tokenAddress as `0x${string}` | null,
+      ).formatted;
+      blockers.push({
+        class: "funding",
+        code: AGENT_REASON_CODES.INSUFFICIENT_FUNDING,
+        message:
+          asset === "ETH"
+            ? `The wallet needs ${formatted} more ETH including its gas reserve.`
+            : `The wallet needs ${formatted} more USDC including API payments.`,
+      });
+    }
+  }
+
+  return {
+    agentWallet: wallet.address.toLowerCase(),
+    admissible: blockers.length === 0,
+    overridable:
+      blockers.length > 0 &&
+      blockers.every((blocker) => blocker.class === "funding"),
+    blockers,
+    funding: {
+      required,
+      held: observation.balances,
+      deficits,
+    },
+    economics: {
+      apiBudgetUsd: formatUnits(apiBudget, 6),
+      gasBudgetRaw: gasBudget.toString(),
+      method: "heuristic",
+    },
+    stateVersion: observation.stateVersion,
+  };
 }

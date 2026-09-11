@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import {
   recordAgentRunReport,
   listAgentRunReports,
@@ -27,9 +28,16 @@ export const GET = createPairingRoute({
         "Owner authentication is required",
       );
     }
-    const limit = Number(req.nextUrl.searchParams.get("limit") ?? 20);
-    const agentId = req.nextUrl.searchParams.get("agentId") ?? undefined;
-    const result = await listAgentRunReports(ownerUserId, limit, agentId);
+    const params = req.nextUrl.searchParams;
+    const agentId = params.get("agentId") ?? undefined;
+    if (agentId && !z.string().uuid().safeParse(agentId).success) {
+      return agentError(400, "INVALID_REQUEST", "Invalid agentId");
+    }
+    const result = await listAgentRunReports(ownerUserId, {
+      limit: Number(params.get("limit") ?? 20),
+      offset: Number(params.get("offset") ?? 0),
+      agentId,
+    });
     const { status, envelope } = toEnvelope(result.status, result.body);
     return NextResponse.json(envelope, { status });
   },

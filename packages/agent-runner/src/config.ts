@@ -18,7 +18,9 @@ export interface RunnerConfig {
   graphVendorSubgraphId?: string;
   graphGatewayUrl: string;
   slippageBps?: number;
-  maxFundingSwaps?: number;
+  maxFundingSwaps?: number | null;
+  maxX402PerRunRaw?: string;
+  minNativeReserveRaw?: string;
   /**
    * Model for the narration. The provider is OpenRouter via lib/ai/client, the
    * same path the owner-facing chat uses; absent credentials mean deterministic
@@ -79,7 +81,7 @@ function commonConfig(): Omit<
 
 export function loadPlatformConfig(input: {
   providerAccountName: string;
-  maxFundingSwaps: number;
+  maxFundingSwaps: number | null;
 }): RunnerConfig {
   const config: RunnerConfig = {
     ...commonConfig(),
@@ -103,7 +105,9 @@ export function loadConfig(): RunnerConfig {
     providerAccountName: process.env.AGENT_NAME?.trim() || null,
     agentPrivateKey: process.env.AGENT_PRIVATE_KEY?.trim() || null,
     chainId: Number(process.env.AGENT_CHAIN_ID || 8453),
-    maxFundingSwaps: Number(process.env.AGENT_MAX_FUNDING_SWAPS || 10),
+    maxFundingSwaps: process.env.AGENT_MAX_FUNDING_SWAPS?.trim()
+      ? Number(process.env.AGENT_MAX_FUNDING_SWAPS)
+      : null,
   };
 
   if (walletProvider === "cdp" && !config.providerAccountName) {
@@ -134,11 +138,13 @@ export function validateRunnerConfig(config: RunnerConfig): void {
     throw new Error("AGENT_POLL_INTERVAL_MS must be at least 1000");
   }
   if (
-    !Number.isInteger(config.maxFundingSwaps) ||
-    config.maxFundingSwaps! < 0 ||
-    config.maxFundingSwaps! > 20
+    config.maxFundingSwaps !== null &&
+    config.maxFundingSwaps !== undefined &&
+    (!Number.isInteger(config.maxFundingSwaps) ||
+      config.maxFundingSwaps < 0 ||
+      config.maxFundingSwaps > 32)
   ) {
-    throw new Error("AGENT_MAX_FUNDING_SWAPS must be an integer from 0 to 20");
+    throw new Error("AGENT_MAX_FUNDING_SWAPS must be an integer from 0 to 32");
   }
 
   if (

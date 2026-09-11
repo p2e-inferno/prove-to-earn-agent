@@ -1,12 +1,15 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { inngest } from "@/lib/inngest/client";
 import { appendAgentReply } from "@/lib/agent-chat/server/store";
+import { getLogger } from "@/lib/utils/logger";
 import {
   listOwnerAgentExecutions,
   resolveOwnerAgentDecision,
 } from "@/lib/quests/daily-quests/services/agent-execution";
 import { agentError, toEnvelope } from "../../errors";
 import { createPairingRoute } from "../../route-factory";
+
+const log = getLogger("agent-gateway:executions:owner");
 
 export const GET = createPairingRoute({
   guard: "owner-privy-session",
@@ -58,13 +61,21 @@ export const POST = createPairingRoute({
         const stateVersion = Number(decision?.execution_state_version);
         if (commandId && Number.isInteger(stateVersion)) {
           if (resolution === "cancel") {
-            await appendAgentReply({
-              agentId: params.agentId,
-              ownerUserId,
-              executionId,
-              content: "I cancelled the owner-authorized quest run.",
-              source: "execution",
-            });
+            try {
+              await appendAgentReply({
+                agentId: params.agentId,
+                ownerUserId,
+                executionId,
+                content: "I cancelled the owner-authorized quest run.",
+                source: "execution",
+              });
+            } catch (error) {
+              log.warn("Could not append the execution cancellation reply", {
+                agentId: params.agentId,
+                executionId,
+                error,
+              });
+            }
           } else {
             await inngest.send({
               id: `agent-execution-decision-${commandId}-${stateVersion}`,
@@ -76,6 +87,43 @@ export const POST = createPairingRoute({
               },
             });
           }
+        }
+      }
+      const commandId =
+        body &&
+        typeof body === "object" &&
+        typeof (body as { commandId?: unknown }).commandId === "string"
+          ? (body as { commandId: string }).commandId
+          : null;
+      const decision = (result.body as { decision?: Record<string, unknown> })
+        .decision;
+      const commandVersion = Number(decision?.command_state_version);
+      const resolution =
+        body && typeof body === "object"
+          ? (body as { resolution?: unknown }).resolution
+          : null;
+      if (commandId && Number.isInteger(commandVersion)) {
+        if (resolution === "cancel") {
+          try {
+            await appendAgentReply({
+              agentId: params.agentId,
+              ownerUserId,
+              content: "I cancelled the owner-authorized quest run.",
+              source: "execution",
+            });
+          } catch (error) {
+            log.warn("Could not append the admission cancellation reply", {
+              agentId: params.agentId,
+              commandId,
+              error,
+            });
+          }
+        } else if (resolution === "proceed" || resolution === "retry") {
+          await inngest.send({
+            id: `agent-execution-admission-${commandId}-${commandVersion}`,
+            name: "agent/execution.requested",
+            data: { agentId: params.agentId, commandId },
+          });
         }
       }
     }

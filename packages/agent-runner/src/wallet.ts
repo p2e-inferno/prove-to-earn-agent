@@ -1,7 +1,11 @@
+import { randomUUID } from "crypto";
 import {
   createWalletClient,
   createPublicClient,
   http,
+  keccak256,
+  parseSignature,
+  serializeTransaction,
   type Address,
   type PublicClient,
 } from "viem";
@@ -43,7 +47,7 @@ export interface AgentWallet {
     to: Address;
     data: `0x${string}`;
     value?: bigint;
-  }): Promise<`0x${string}`>;
+  }, lifecycle?: TransactionLifecycle): Promise<`0x${string}`>;
   signMessage(message: string): Promise<`0x${string}`>;
   signTypedData(args: {
     domain: Record<string, unknown>;
@@ -53,7 +57,78 @@ export interface AgentWallet {
   }): Promise<`0x${string}`>;
   waitForReceipt(
     hash: `0x${string}`,
-  ): Promise<{ status: "success" | "reverted" }>;
+  ): Promise<{
+    status: "success" | "reverted";
+    gasCostRaw?: string;
+    blockNumber?: string;
+  }>;
+}
+
+export interface PreparedAgentTransaction {
+  to: Address;
+  data: `0x${string}`;
+  value: string;
+  nonce: number;
+  gas: string;
+  maxFeePerGas: string;
+  maxPriorityFeePerGas: string;
+  chainId: number;
+}
+
+export interface TransactionLifecycle {
+  beforeSign(prepared: PreparedAgentTransaction): Promise<{
+    providerIdempotencyKey: string;
+    signedTransaction?: `0x${string}`;
+    transactionHash?: `0x${string}`;
+  }>;
+  persistSigned(input: {
+    prepared: PreparedAgentTransaction;
+    providerIdempotencyKey: string;
+    signedTransaction: `0x${string}`;
+    transactionHash: `0x${string}`;
+  }): Promise<void>;
+  submitted(transactionHash: `0x${string}`): Promise<void>;
+  reconciled?(input: {
+    transactionHash: `0x${string}`;
+    status: "success" | "reverted";
+    gasCostRaw?: string;
+  }): Promise<void>;
+}
+
+function publicPreparation(request: Record<string, unknown>): PreparedAgentTransaction {
+  const required = ["to", "data", "nonce", "gas", "maxFeePerGas", "maxPriorityFeePerGas", "chainId"];
+  if (required.some((key) => request[key] === undefined || request[key] === null)) {
+    throw new Error("Prepared transaction is missing an EIP-1559 field");
+  }
+  return {
+    to: request.to as Address,
+    data: request.data as `0x${string}`,
+    value: String(request.value ?? 0),
+    nonce: Number(request.nonce),
+    gas: String(request.gas),
+    maxFeePerGas: String(request.maxFeePerGas),
+    maxPriorityFeePerGas: String(request.maxPriorityFeePerGas),
+    chainId: Number(request.chainId),
+  };
+}
+
+async function broadcastSigned(
+  publicClient: PublicClient,
+  signedTransaction: `0x${string}`,
+  transactionHash: `0x${string}`,
+) {
+  try {
+    return await publicClient.sendRawTransaction({
+      serializedTransaction: signedTransaction,
+    });
+  } catch (error) {
+    try {
+      await publicClient.getTransaction({ hash: transactionHash });
+      return transactionHash;
+    } catch {
+      throw error;
+    }
+  }
 }
 
 function clientsFor(config: RunnerConfig) {
@@ -91,14 +166,42 @@ export function createLocalWallet(config: RunnerConfig): AgentWallet {
     x402Signer: account as unknown as X402Signer,
     publicClient,
 
-    async sendTransaction(tx) {
-      return walletClient.sendTransaction({
+    async sendTransaction(tx, lifecycle) {
+      const request = await walletClient.prepareTransactionRequest({
         account,
         chain: base,
         to: tx.to,
         data: tx.data,
         value: tx.value ?? 0n,
+        type: "eip1559",
       });
+      const prepared = publicPreparation(request as unknown as Record<string, unknown>);
+      const directive = lifecycle
+        ? await lifecycle.beforeSign(prepared)
+        : { providerIdempotencyKey: randomUUID() };
+      if (directive.transactionHash) {
+        const hash = directive.signedTransaction
+          ? await broadcastSigned(
+              publicClient,
+              directive.signedTransaction,
+              directive.transactionHash,
+            )
+          : directive.transactionHash;
+        await lifecycle?.submitted(hash);
+        return hash;
+      }
+      const providerIdempotencyKey = directive.providerIdempotencyKey;
+      const signedTransaction = await account.signTransaction(request as never);
+      const transactionHash = keccak256(signedTransaction);
+      await lifecycle?.persistSigned({
+        prepared,
+        providerIdempotencyKey,
+        signedTransaction,
+        transactionHash,
+      });
+      const hash = await broadcastSigned(publicClient, signedTransaction, transactionHash);
+      await lifecycle?.submitted(hash);
+      return hash;
     },
 
     async signMessage(message) {
@@ -114,7 +217,11 @@ export function createLocalWallet(config: RunnerConfig): AgentWallet {
         hash,
         confirmations: 1,
       });
-      return { status: receipt.status };
+      return {
+        status: receipt.status,
+        gasCostRaw: (receipt.gasUsed * receipt.effectiveGasPrice).toString(),
+        blockNumber: receipt.blockNumber.toString(),
+      };
     },
   };
 }
@@ -162,14 +269,51 @@ export async function createCdpWallet(
     x402Signer: cdpAccount as unknown as X402Signer,
     publicClient,
 
-    async sendTransaction(tx) {
-      return walletClient.sendTransaction({
+    async sendTransaction(tx, lifecycle) {
+      const request = await walletClient.prepareTransactionRequest({
         account: viemAccount,
         chain: base,
         to: tx.to,
         data: tx.data,
         value: tx.value ?? 0n,
+        type: "eip1559",
       });
+      const prepared = publicPreparation(request as unknown as Record<string, unknown>);
+      const directive = lifecycle
+        ? await lifecycle.beforeSign(prepared)
+        : { providerIdempotencyKey: randomUUID() };
+      if (directive.transactionHash) {
+        const hash = directive.signedTransaction
+          ? await broadcastSigned(
+              publicClient,
+              directive.signedTransaction,
+              directive.transactionHash,
+            )
+          : directive.transactionHash;
+        await lifecycle?.submitted(hash);
+        return hash;
+      }
+      const providerIdempotencyKey = directive.providerIdempotencyKey;
+      const unsigned = serializeTransaction(request as never);
+      const signature = await cdp.evm.signTransaction({
+        address: cdpAccount.address,
+        transaction: unsigned,
+        idempotencyKey: providerIdempotencyKey,
+      });
+      const signedTransaction = serializeTransaction(
+        request as never,
+        parseSignature(signature.signature),
+      );
+      const transactionHash = keccak256(signedTransaction);
+      await lifecycle?.persistSigned({
+        prepared,
+        providerIdempotencyKey,
+        signedTransaction,
+        transactionHash,
+      });
+      const hash = await broadcastSigned(publicClient, signedTransaction, transactionHash);
+      await lifecycle?.submitted(hash);
+      return hash;
     },
 
     async signMessage(message) {
@@ -188,7 +332,11 @@ export async function createCdpWallet(
         hash,
         confirmations: 1,
       });
-      return { status: receipt.status };
+      return {
+        status: receipt.status,
+        gasCostRaw: (receipt.gasUsed * receipt.effectiveGasPrice).toString(),
+        blockNumber: receipt.blockNumber.toString(),
+      };
     },
   };
 }

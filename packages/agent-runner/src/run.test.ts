@@ -7,6 +7,7 @@ const fetchAgentHistory = jest.fn();
 const observeCandidates = jest.fn();
 const executeCandidate = jest.fn();
 const chatCompletion = jest.fn();
+let modelCandidateIds: string[] = [];
 
 jest.mock("@/lib/ai/client", () => ({
   chatCompletion: (...args: unknown[]) => chatCompletion(...args),
@@ -46,7 +47,11 @@ jest.mock("@ethereum-attestation-service/eas-sdk", () => ({ EAS: class {} }));
 import { runDailyQuest } from "./run";
 import type { AgentWallet } from "./wallet";
 import type { RunnerConfig } from "./config";
-import type { ActionCandidate } from "./actions/types";
+import {
+  actionCandidateSchema,
+  assetAmount,
+  type ActionCandidate,
+} from "./actions/types";
 import { actionByName } from "./actions/registry";
 
 const waitForReceipt = jest.fn();
@@ -99,7 +104,7 @@ const swapTask = (id: string, overrides: Record<string, unknown> = {}) => ({
 });
 
 const candidateFor = (taskId: string): ActionCandidate =>
-  ({
+  actionCandidateSchema.parse({
     candidateId: `cand_${taskId
       .replace(/[^a-f0-9]/g, "a")
       .padEnd(32, "0")
@@ -127,7 +132,7 @@ const candidateFor = (taskId: string): ActionCandidate =>
     rank: 1,
     explanation: "go",
     expiresAt: null,
-  }) as ActionCandidate;
+  });
 
 function listWith(tasks: unknown[]) {
   return okResult({
@@ -163,7 +168,7 @@ const published = () =>
  */
 function modelPicksEveryCandidate() {
   process.env.OPENROUTER_API_KEY = "test-key";
-  let seen: string[] = [];
+  modelCandidateIds = [];
   let turn = 0;
   chatCompletion.mockImplementation(async () => {
     turn += 1;
@@ -180,7 +185,11 @@ function modelPicksEveryCandidate() {
         assistantMessage: { role: "assistant", content: null, tool_calls: [] },
       };
     }
-    const next = seen.shift();
+    const observed = observeCandidates.mock.results.at(-1)?.value
+      ? await observeCandidates.mock.results.at(-1)!.value
+      : null;
+    const next =
+      modelCandidateIds.shift() ?? observed?.candidates?.[0]?.candidateId;
     if (!next) return { success: true, finishReason: "stop", content: "done" };
     return {
       success: true,
@@ -205,7 +214,7 @@ function modelPicksEveryCandidate() {
       const candidates = args.tasks
         .filter((task) => !args.settledTaskIds?.has(task.id))
         .map((task) => candidateFor(task.id));
-      seen = candidates.map((candidate) => candidate.candidateId);
+      modelCandidateIds = candidates.map((candidate) => candidate.candidateId);
       return {
         stateVersion: "s1",
         blockNumber: "1",
@@ -220,27 +229,29 @@ function modelPicksEveryCandidate() {
 
 /** Offer one candidate per unsettled task, the way the real observer does. */
 function offerCandidatesFor(taskIds: string[]) {
-  observeCandidates.mockImplementation(
-    async (args: { settledTaskIds?: Set<string> }) => ({
+  observeCandidates.mockImplementation(async (args: { settledTaskIds?: Set<string> }) => {
+    const candidates = taskIds
+      .filter((id) => !args.settledTaskIds?.has(id))
+      .map(candidateFor);
+    modelCandidateIds = candidates.map((candidate) => candidate.candidateId);
+    return {
       stateVersion: "s1",
       blockNumber: "1",
       balances: [],
-      candidates: taskIds
-        .filter((id) => !args.settledTaskIds?.has(id))
-        .map(candidateFor),
+      candidates,
       ownerBlockers: [],
       fatalBlockers: [],
-    }),
-  );
+    };
+  });
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
-  delete process.env.OPENROUTER_API_KEY;
+  modelPicksEveryCandidate();
   fetchAgentHistory.mockResolvedValue({
     swaps: [],
     vendorEvents: [],
-    vendorTotals: null,
+    vendorTotals: [],
   });
   waitForReceipt.mockResolvedValue({ status: "success" });
   getTransactionReceipt.mockResolvedValue({ status: "success" });
@@ -468,6 +479,84 @@ describe("runDailyQuest", () => {
     expect(report.questCompleted).toBe(true);
   });
 
+  it("reports the attestation and the completion key the gateway returned", async () => {
+    const keyTx = `0x${"ab".repeat(32)}`;
+    const uid = `0x${"cd".repeat(32)}`;
+    route({
+      "/quests/run-1/start": () => okResult({}),
+      "/quests/run-1/complete": () =>
+        okResult({
+          transactionHash: keyTx,
+          completionBonusGranted: 50,
+          rewardWallet: "0x0000000000000000000000000000000000000002",
+        }),
+      "/quests/run-1": () =>
+        okResult({
+          completions: [
+            {
+              id: "c1",
+              daily_quest_run_task_id: "t1",
+              submission_status: "completed",
+              reward_claimed: false,
+            },
+          ],
+        }),
+      "/intent": () => errResult("EAS_DISABLED"),
+      "/tasks/claim": () =>
+        okResult({
+          rewardAmount: 7,
+          attestationUid: uid,
+          attestationScanUrl: `https://base.easscan.org/attestation/view/${uid}`,
+        }),
+      "/reports": () => okResult({}),
+      "/quests": () => listWith([swapTask("t1")]),
+    });
+
+    const report = await runDailyQuest(wallet, config, {});
+
+    expect(report.tasks[0]).toMatchObject({
+      attestationUid: uid,
+      attestationUrl: `https://base.easscan.org/attestation/view/${uid}`,
+    });
+    const body = (published()[0]![1] as { body: Record<string, unknown> }).body;
+    expect(body.completion).toEqual({
+      txHash: keyTx,
+      bonusAmount: 50,
+      rewardWallet: "0x0000000000000000000000000000000000000002",
+    });
+  });
+
+  it("ignores an attestation link that is not https", async () => {
+    route({
+      "/quests/run-1/start": () => okResult({}),
+      "/quests/run-1/complete": () => okResult({ transactionHash: "0xkey" }),
+      "/quests/run-1": () =>
+        okResult({
+          completions: [
+            {
+              id: "c1",
+              daily_quest_run_task_id: "t1",
+              submission_status: "completed",
+              reward_claimed: false,
+            },
+          ],
+        }),
+      "/intent": () => errResult("EAS_DISABLED"),
+      "/tasks/claim": () =>
+        okResult({
+          rewardAmount: 7,
+          attestationScanUrl: "javascript:alert(1)",
+        }),
+      "/reports": () => okResult({}),
+      "/quests": () => listWith([swapTask("t1")]),
+    });
+
+    const report = await runDailyQuest(wallet, config, {});
+
+    expect(report.tasks[0]!.attestationUrl).toBeUndefined();
+    expect(report.tasks[0]!.rewardAmount).toBe(7);
+  });
+
   it("refuses to act when it cannot read what already settled", async () => {
     offerCandidatesFor(["t1"]);
     route({
@@ -560,12 +649,15 @@ describe("runDailyQuest", () => {
     fetchAgentHistory.mockResolvedValue({
       swaps: [{ id: "s1" }],
       vendorEvents: [{ id: "v1" }],
-      vendorTotals: {
-        stage: 2,
-        totalBought: "1",
-        totalSold: "0",
-        lightUpCount: 1,
-      },
+      vendorTotals: [
+        {
+          account: "0xagent",
+          stage: 2,
+          totalBought: "1",
+          totalSold: "0",
+          lightUpCount: 1,
+        },
+      ],
     });
     route({
       "/quests/run-1/start": () => okResult({}),
@@ -623,6 +715,64 @@ describe("runDailyQuest", () => {
       txHash: HASH,
     });
     expect(report.succeeded).toBe(false);
+  });
+
+  it("records what a confirmed action delivered to the agent wallet", async () => {
+    const agentAddress = "0x00000000000000000000000000000000000000aa";
+    const upToken = "0x0000000000000000000000000000000000000a01";
+    const agent = { ...wallet, address: agentAddress } as AgentWallet;
+    observeCandidates.mockImplementation(
+      async (args: { settledTaskIds?: Set<string> }) => ({
+        stateVersion: "s1",
+        blockNumber: "1",
+        balances: [
+          {
+            asset: "UP",
+            tokenAddress: upToken,
+            decimals: 18,
+            raw: "0",
+            formatted: "0",
+          },
+        ],
+        candidates: args.settledTaskIds?.has("t1") ? [] : [candidateFor("t1")],
+        ownerBlockers: [],
+        fatalBlockers: [],
+      }),
+    );
+    getTransactionReceipt.mockResolvedValue({
+      status: "success",
+      gasUsed: 21_000n,
+      effectiveGasPrice: 1_000n,
+      logs: [
+        {
+          address: upToken,
+          topics: [
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            `0x${"00".repeat(12)}${"bb".repeat(20)}`,
+            `0x${"00".repeat(12)}${agentAddress.slice(2)}`,
+          ],
+          data: `0x${(12n * 10n ** 18n).toString(16).padStart(64, "0")}`,
+        },
+      ],
+    });
+    route({
+      "/quests/run-1/start": () => okResult({}),
+      "/tasks/complete": () => okResult({ completionId: "c1" }),
+      "/intent": () => errResult("EAS_DISABLED"),
+      "/tasks/claim": () => okResult({ rewardAmount: 5 }),
+      "/quests/run-1/complete": () => okResult({}),
+      "/reports": () => okResult({}),
+      "/quests": () => listWith([swapTask("t1")]),
+    });
+
+    const report = await runDailyQuest(agent, config, {});
+
+    const entry = report.actionTimeline?.find((e) => e.txHash === HASH);
+    expect(entry?.received).toMatchObject({
+      asset: "UP",
+      raw: String(12n * 10n ** 18n),
+    });
+    expect(entry?.gasCostRaw).toBe(String(21_000n * 1_000n));
   });
 
   it("marks a candidate the chain rejected without claiming", async () => {
@@ -735,6 +885,59 @@ describe("runDailyQuest", () => {
 
     expect(executeCandidate).not.toHaveBeenCalled();
     expect(report.blockingCode).toBe("FUNDING_SWAP_LIMIT");
+    expect(report.spend?.guards).toMatchObject({
+      maxFundingSwaps: 1,
+      fundingSwapsRemaining: 0,
+    });
+  });
+
+  it("does not invent a funding-swap cap when the owner left it uncapped", async () => {
+    const prerequisite = {
+      ...candidateFor("t1"),
+      candidateId: `cand_${"c".repeat(32)}`,
+      purpose: {
+        kind: "prerequisite" as const,
+        forTaskId: "t1",
+        resolves: [
+          {
+            kind: "asset" as const,
+            asset: "UP" as const,
+            requiredRaw: "10",
+            deficitRaw: "10",
+          },
+        ],
+      },
+    } as ActionCandidate;
+    observeCandidates.mockResolvedValue({
+      stateVersion: "s1",
+      blockNumber: "1",
+      balances: [],
+      candidates: [prerequisite],
+      ownerBlockers: [],
+      fatalBlockers: [],
+    });
+    route({
+      "/quests/run-1/start": () => okResult({}),
+      "/reports": () => okResult({}),
+      "/quests": () => listWith([swapTask("t1")]),
+    });
+    const restoredTimeline = Array.from({ length: 11 }, (_, index) => ({
+      actionName: "p2e_uniswap_swap",
+      purpose: "prerequisite" as const,
+      taskId: "t1",
+      status: "confirmed" as const,
+      txHash: `${HASH.slice(0, -2)}${index.toString(16).padStart(2, "0")}`,
+    }));
+
+    const report = await runDailyQuest(
+      wallet,
+      { ...config, maxFundingSwaps: null },
+      { restoredTimeline },
+    );
+
+    expect(executeCandidate).toHaveBeenCalledTimes(1);
+    expect(report.spend?.fundingSwaps).toBe(12);
+    expect(report.spend?.guards.fundingSwapsRemaining).toBeNull();
   });
 
   it("records every executed action in the timeline, quest and prerequisite alike", async () => {
@@ -760,6 +963,43 @@ describe("runDailyQuest", () => {
         txHash: HASH,
       }),
     ]);
+    expect(report.spend?.guards).toMatchObject({
+      maxFundingSwaps: null,
+      fundingSwapsRemaining: null,
+    });
+  });
+
+  it("keeps paid-call counters across a restored worker checkpoint", async () => {
+    route({
+      "/quests": () => errResult("GATEWAY_UNAVAILABLE", 503),
+      "/reports": () => okResult({}),
+    });
+
+    const report = await runDailyQuest(wallet, config, {
+      restoredSpend: {
+        startingSpendable: [],
+        gasSpent: assetAmount("ETH", 0n, 18, null),
+        principalSpent: [],
+        apiSpent: assetAmount("USDC", 7_000n, 6, null),
+        fundingSwaps: 0,
+        paidCalls: 4,
+        discountedCalls: 2,
+        guards: {
+          maxFundingSwaps: null,
+          fundingSwapsRemaining: null,
+          maxSteps: 32,
+          stepsRemaining: 32,
+        },
+      },
+    });
+
+    expect(report.totalPaidCalls).toBe(4);
+    expect(report.discountedCalls).toBe(2);
+    expect(report.spend).toMatchObject({
+      paidCalls: 4,
+      discountedCalls: 2,
+      apiSpent: { raw: "7000" },
+    });
   });
 
   it("checkpoints intent before broadcast and the hash before confirmation", async () => {
@@ -811,6 +1051,7 @@ describe("runDailyQuest", () => {
   });
 
   it("does not guess an execution order when more than one candidate is safe", async () => {
+    delete process.env.OPENROUTER_API_KEY;
     offerCandidatesFor(["t1", "t2"]);
     const swap = actionByName("p2e_uniswap_swap")!;
     const execute = jest.spyOn(swap, "execute" as never).mockResolvedValue({

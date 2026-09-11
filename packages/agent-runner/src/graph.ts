@@ -15,7 +15,7 @@ import { paidFetch } from "./paid-fetch";
 export interface AgentHistory {
   swaps: SubgraphSwap[];
   vendorEvents: VendorEvent[];
-  vendorTotals: VendorAccountTotals | null;
+  vendorTotals: VendorAccountTotals[];
   sources: {
     uniswap: HistorySourceState;
     vendor: HistorySourceState;
@@ -124,8 +124,9 @@ export function summarizeHistory(history: AgentHistory): string | null {
   if (history.swaps.length) {
     parts.push(`${history.swaps.length} recent swap(s) on record`);
   }
-  if (history.vendorTotals) {
-    parts.push(`vendor stage ${history.vendorTotals.stage}`);
+  if (history.vendorTotals.length) {
+    const stage = Math.max(...history.vendorTotals.map((t) => t.stage));
+    parts.push(`vendor stage ${stage}`);
   }
   if (history.vendorEvents.length) {
     parts.push(`${history.vendorEvents.length} recent vendor action(s)`);

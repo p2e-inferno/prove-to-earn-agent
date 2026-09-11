@@ -25,3 +25,10 @@ export { allRouteConfigs, getResourceServer } from "./payments/x402";
 export { agentError, agentOk, toEnvelope, type AgentEnvelope } from "./errors";
 export { buildRewardClaimIntent } from "./intents/attestation";
 export { AGENT_NETWORK, AGENT_CHAIN_ID } from "./env";
+export {
+  headlessAgentAuthEnabled,
+  headlessAgentApiEnabled,
+  headlessAgentMcpEnabled,
+  headlessAgentIssuer,
+  headlessAgentResource,
+} from "./env";

@@ -33,7 +33,11 @@ import { observeCandidates, executeCandidate } from "./candidates";
 import { actionByName, actionForTaskType } from "./actions/registry";
 import type { AgentWallet } from "./wallet";
 import type { RunnerConfig } from "./config";
-import type { ActionCandidate, ActionContext } from "./actions/types";
+import {
+  actionAnalysisSchema,
+  type ActionCandidate,
+  type ActionContext,
+} from "./actions/types";
 
 const getBlockNumber = jest.fn();
 
@@ -137,7 +141,7 @@ function analysisShortOfPoints(deficitRaw: string) {
 }
 
 function readyAnalysis() {
-  return {
+  return actionAnalysisSchema.parse({
     executableNow: true,
     requirements: [],
     effects: [],
@@ -149,7 +153,7 @@ function readyAnalysis() {
       observedAt: new Date().toISOString(),
       expiresAt: null,
     },
-  };
+  });
 }
 
 beforeEach(() => {
@@ -193,6 +197,7 @@ describe("observeCandidates", () => {
     expect(observation.candidates).toHaveLength(1);
     expect(observation.candidates[0]).toMatchObject({
       purpose: { kind: "quest_task", taskId: "t-buy" },
+      estimatedCostUsd: "0.0061",
     });
   });
 

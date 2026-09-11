@@ -1,17 +1,21 @@
 import { z } from "zod";
 import {
   DEFAULT_SLIPPAGE_BPS,
+  FEE_CONFIG,
   UNISWAP_ADDRESSES,
 } from "@/lib/uniswap/constants";
 import { quoteSwapRoute, resolveSwapRoute } from "@/lib/uniswap/route";
 import type { SwapDirection, SwapPair } from "@/lib/uniswap/types";
-import { executeSwap } from "../uniswap-action";
+import { executeSwap, prepareSwapTransaction } from "../uniswap-action";
 import { readBalances } from "../balances";
 import {
   actionAnalysisSchema,
+  actionEconomics,
   actionResultSchema,
+  actionValue,
   assetAmount,
   confirmedResult,
+  estimateActionGas,
   observedQuote,
   type ActionDefinition,
   type Asset,
@@ -96,6 +100,35 @@ export const uniswapSwapAction: ActionDefinition<UniswapSwapInput> = {
     );
     const slippageBps = BigInt(ctx.config.slippageBps ?? DEFAULT_SLIPPAGE_BPS);
     const minOut = quotedRaw - (quotedRaw * slippageBps) / 10_000n;
+    const feeBps = BigInt(FEE_CONFIG.feeBips);
+    const expectedReceived = quotedRaw - (quotedRaw * feeBps) / 10_000n;
+    const minimumReceived = minOut - (minOut * feeBps) / 10_000n;
+    const prepared = await prepareSwapTransaction(ctx.wallet, ctx.config, {
+      pair: parsed.pair,
+      direction: parsed.direction,
+      amountIn: requiredRaw,
+      amountOutMin: minOut,
+      slippageBps: ctx.config.slippageBps,
+    });
+    const gas = await estimateActionGas(ctx.wallet, prepared);
+    const principal = assetAmount(
+      inputAsset,
+      requiredRaw,
+      decimals[inputAsset],
+      tokenFor(inputAsset),
+    );
+    const expectedOutput = assetAmount(
+      outputAsset,
+      expectedReceived,
+      decimals[outputAsset],
+      tokenFor(outputAsset),
+    );
+    const minimumOutput = assetAmount(
+      outputAsset,
+      minimumReceived,
+      decimals[outputAsset],
+      tokenFor(outputAsset),
+    );
 
     return actionAnalysisSchema.parse({
       executableNow: deficitRaw === 0n,
@@ -132,7 +165,7 @@ export const uniswapSwapAction: ActionDefinition<UniswapSwapInput> = {
           kind: "asset",
           asset: assetAmount(
             outputAsset,
-            minOut,
+            minimumReceived,
             decimals[outputAsset],
             tokenFor(outputAsset),
           ),
@@ -149,7 +182,16 @@ export const uniswapSwapAction: ActionDefinition<UniswapSwapInput> = {
               },
             ]
           : [],
-      gasEstimateRaw: null,
+      gasEstimateRaw: gas.estimateRaw,
+      economics: actionEconomics(
+        gas,
+        actionValue(
+          principal,
+          expectedOutput,
+          minimumOutput,
+          FEE_CONFIG.feeBips,
+        ),
+      ),
       quote: observedQuote("rpc", blockNumber, new Date(Date.now() + 60_000)),
     });
   },

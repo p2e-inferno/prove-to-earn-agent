@@ -7,11 +7,16 @@ import { ensureErc20Allowance } from "../approvals";
 import { readBalances } from "../balances";
 import {
   actionAnalysisSchema,
+  actionEconomics,
   actionResultSchema,
+  actionValue,
   assetAmount,
   confirmedResult,
+  estimateActionGas,
   observedQuote,
+  zeroGasEconomics,
   type ActionContext,
+  type AnalyzeContext,
   type ActionDefinition,
   type ActionResult,
   type Blocker,
@@ -43,7 +48,7 @@ function vendorAddress(): `0x${string}` {
   return value as `0x${string}`;
 }
 
-async function readVendor(ctx: ActionContext) {
+async function readVendor(ctx: AnalyzeContext) {
   const address = vendorAddress();
   const [tokens, fees, exchangeRate, user, paused, hasValidKey, blockNumber] =
     await Promise.all([
@@ -114,7 +119,7 @@ async function readVendor(ctx: ActionContext) {
  * second copy of the vendor's fee and exchange-rate arithmetic.
  */
 export async function upRequiredForDg(
-  ctx: ActionContext,
+  ctx: AnalyzeContext,
   dgAmount: bigint,
 ): Promise<bigint | null> {
   const state = await readVendor(ctx);
@@ -126,7 +131,7 @@ export async function upRequiredForDg(
 }
 
 export async function qualifyingBuyForPoints(
-  ctx: ActionContext,
+  ctx: AnalyzeContext,
 ): Promise<bigint | null> {
   const state = await readVendor(ctx);
   const stage = (await ctx.wallet.publicClient.readContract({
@@ -162,6 +167,22 @@ function commonBlockers(state: {
         ]
       : []),
   ];
+}
+
+function estimateVendorGas(
+  ctx: AnalyzeContext,
+  address: `0x${string}`,
+  functionName: "buyTokens" | "sellTokens" | "lightUp" | "upgradeStage",
+  args?: readonly [bigint],
+) {
+  return estimateActionGas(ctx.wallet, {
+    to: address,
+    data: encodeFunctionData({
+      abi: DG_TOKEN_VENDOR_ABI,
+      functionName,
+      ...(args ? { args } : {}),
+    } as never),
+  });
 }
 
 async function sendVendor(
@@ -237,12 +258,15 @@ export const vendorBuyAction: ActionDefinition<VendorAmountInput> = {
       readVendor(ctx),
       readBalances(ctx.wallet),
     ]);
-    const stage = (await ctx.wallet.publicClient.readContract({
-      address: state.address,
-      abi: DG_TOKEN_VENDOR_ABI,
-      functionName: "getStageConfig",
-      args: [state.userState.stage],
-    })) as StageConfig;
+    const [stage, gas] = await Promise.all([
+      ctx.wallet.publicClient.readContract({
+        address: state.address,
+        abi: DG_TOKEN_VENDOR_ABI,
+        functionName: "getStageConfig",
+        args: [state.userState.stage],
+      }) as Promise<StageConfig>,
+      estimateVendorGas(ctx, state.address, "buyTokens", [amount]),
+    ]);
     const deficit = amount > balances.UP ? amount - balances.UP : 0n;
     const estimate = estimateBuy(
       amount,
@@ -292,7 +316,16 @@ export const vendorBuyAction: ActionDefinition<VendorAmountInput> = {
           : []),
       ],
       blockers,
-      gasEstimateRaw: null,
+      gasEstimateRaw: gas.estimateRaw,
+      economics: actionEconomics(
+        gas,
+        actionValue(
+          assetAmount("UP", amount, 18, state.tokenConfig.baseToken),
+          assetAmount("DG", estimate.outSwap, 18, state.tokenConfig.swapToken),
+          null,
+          Number(state.feeConfig.buyFeeBps),
+        ),
+      ),
       quote: observedQuote("contract", state.blockNumber),
     });
   },
@@ -328,6 +361,9 @@ export const vendorSellAction: ActionDefinition<VendorAmountInput> = {
       state.feeConfig.sellFeeBps,
       state.exchangeRate,
     );
+    const gas = await estimateVendorGas(ctx, state.address, "sellTokens", [
+      amount,
+    ]);
     const blockers = commonBlockers(state);
     if (deficit > 0n)
       blockers.push({
@@ -368,7 +404,16 @@ export const vendorSellAction: ActionDefinition<VendorAmountInput> = {
         },
       ],
       blockers,
-      gasEstimateRaw: null,
+      gasEstimateRaw: gas.estimateRaw,
+      economics: actionEconomics(
+        gas,
+        actionValue(
+          assetAmount("DG", amount, 18, state.tokenConfig.swapToken),
+          assetAmount("UP", estimate.outBase, 18, state.tokenConfig.baseToken),
+          null,
+          Number(state.feeConfig.sellFeeBps),
+        ),
+      ),
       quote: observedQuote("contract", state.blockNumber),
     });
   },
@@ -397,12 +442,15 @@ export const vendorLightUpAction: ActionDefinition<VendorStageInput> = {
       readVendor(ctx),
       readBalances(ctx.wallet),
     ]);
-    const stage = (await ctx.wallet.publicClient.readContract({
-      address: state.address,
-      abi: DG_TOKEN_VENDOR_ABI,
-      functionName: "getStageConfig",
-      args: [state.userState.stage],
-    })) as { burnAmount: bigint; fuelRate: bigint };
+    const [stage, gas] = await Promise.all([
+      ctx.wallet.publicClient.readContract({
+        address: state.address,
+        abi: DG_TOKEN_VENDOR_ABI,
+        functionName: "getStageConfig",
+        args: [state.userState.stage],
+      }) as Promise<{ burnAmount: bigint; fuelRate: bigint }>,
+      estimateVendorGas(ctx, state.address, "lightUp"),
+    ]);
     const deficit =
       stage.burnAmount > balances.UP ? stage.burnAmount - balances.UP : 0n;
     const blockers = commonBlockers(state);
@@ -441,7 +489,13 @@ export const vendorLightUpAction: ActionDefinition<VendorStageInput> = {
         { kind: "fuel", estimatedChangeRaw: stage.fuelRate.toString() },
       ],
       blockers,
-      gasEstimateRaw: null,
+      gasEstimateRaw: gas.estimateRaw,
+      economics: actionEconomics(
+        gas,
+        actionValue(
+          assetAmount("UP", stage.burnAmount, 18, state.tokenConfig.baseToken),
+        ),
+      ),
       quote: observedQuote("contract", state.blockNumber),
     });
   },
@@ -492,6 +546,7 @@ export const vendorLevelUpAction: ActionDefinition<VendorStageInput> = {
         effects: [{ kind: "stage", estimatedChangeRaw: "0" }],
         blockers: [],
         gasEstimateRaw: "0",
+        economics: actionEconomics(zeroGasEconomics()),
         quote: observedQuote("contract", state.blockNumber),
       });
     }
@@ -508,6 +563,7 @@ export const vendorLevelUpAction: ActionDefinition<VendorStageInput> = {
           },
         ],
         gasEstimateRaw: "0",
+        economics: actionEconomics(zeroGasEconomics()),
         quote: observedQuote("contract", state.blockNumber),
       });
     }
@@ -517,6 +573,7 @@ export const vendorLevelUpAction: ActionDefinition<VendorStageInput> = {
       functionName: "getStageConfig",
       args: [state.userState.stage + 1],
     })) as StageConfig;
+    const gas = await estimateVendorGas(ctx, state.address, "upgradeStage");
     const pointsDeficit =
       stage.upgradePointsThreshold > state.userState.points
         ? stage.upgradePointsThreshold - state.userState.points
@@ -558,7 +615,8 @@ export const vendorLevelUpAction: ActionDefinition<VendorStageInput> = {
       ],
       effects: [{ kind: "stage", estimatedChangeRaw: "1" }],
       blockers,
-      gasEstimateRaw: null,
+      gasEstimateRaw: gas.estimateRaw,
+      economics: actionEconomics(gas),
       quote: observedQuote("contract", state.blockNumber),
     });
   },

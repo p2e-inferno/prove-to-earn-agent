@@ -41,6 +41,8 @@ export {
   bindAction,
   UnsupportedActionError,
   type ActionContext,
+  type AnalyzeContext,
+  type ReadOnlyAgentWallet,
   type ActionResult,
   type AgentAction,
   type BoundAction,

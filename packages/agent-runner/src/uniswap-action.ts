@@ -10,7 +10,7 @@ import { quoteSwapRoute, resolveSwapRoute } from "@/lib/uniswap/route";
 import { getDataSuffix } from "@/lib/blockchain/attribution";
 import type { SwapDirection, SwapPair } from "@/lib/uniswap/types";
 import type { AgentWallet } from "./wallet";
-import type { ActionContext } from "./actions/types";
+import type { ActionContext, ReadOnlyAgentWallet } from "./actions/types";
 import { ensureSwapApprovals, type ApprovalStep } from "./approvals";
 import type { RunnerConfig } from "./config";
 
@@ -38,26 +38,27 @@ export interface SwapExecution {
   amountOutMin: bigint;
 }
 
-export async function executeSwap(
-  wallet: AgentWallet,
+export interface PreparedSwapTransaction {
+  to: `0x${string}`;
+  data: `0x${string}`;
+  value: bigint;
+  amountOutMin: bigint;
+  route: ReturnType<typeof resolveSwapRoute>;
+}
+
+export async function prepareSwapTransaction(
+  wallet: ReadOnlyAgentWallet,
   config: RunnerConfig,
   request: SwapRequest,
-  onTransactionPrepared?: (approvals: ApprovalStep[]) => Promise<void>,
-  onApprovalTransaction?: ActionContext["onApprovalTransaction"],
-): Promise<SwapExecution> {
+): Promise<PreparedSwapTransaction> {
   if (!ROUTE_CONFIG[request.pair]) {
     throw new Error(`Unsupported pair: ${request.pair}`);
   }
-
   const feeRecipient = FEE_CONFIG.feeRecipient;
   if (!feeRecipient) {
     throw new Error("NEXT_PUBLIC_UNISWAP_FEE_WALLET is not configured");
   }
-
   const route = resolveSwapRoute(request.pair, request.direction);
-
-  // A zero minimum is an unbounded-loss order. The minimum is quoted on-chain
-  // and discounted by the slippage tolerance unless the caller pins it.
   let amountOutMin = request.amountOutMin;
   if (amountOutMin === undefined) {
     const quoted = await quoteSwapRoute(
@@ -68,13 +69,11 @@ export async function executeSwap(
     const bps = BigInt(request.slippageBps ?? DEFAULT_SLIPPAGE_BPS);
     amountOutMin = quoted - (quoted * bps) / 10_000n;
   }
-
   if (amountOutMin <= 0n) {
     throw new Error(
       "Refusing to swap with a zero minimum output; the quote returned nothing",
     );
   }
-
   const { calldata, value } = encodeSwapWithFeeManual({
     tokenOut: route.nativeOutput ? UNISWAP_ADDRESSES.weth : route.tokenOut,
     path: route.path,
@@ -87,30 +86,45 @@ export async function executeSwap(
     isNativeEthOut: route.nativeOutput,
     deadline: Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SECONDS,
   });
-
   const suffix = getDataSuffix(config.chainId);
-  const data = (
-    suffix ? `${calldata}${suffix.slice(2)}` : calldata
-  ) as `0x${string}`;
+  return {
+    to: UNISWAP_ADDRESSES.universalRouter,
+    data: (suffix
+      ? `${calldata}${suffix.slice(2)}`
+      : calldata) as `0x${string}`,
+    value,
+    amountOutMin,
+    route,
+  };
+}
+
+export async function executeSwap(
+  wallet: AgentWallet,
+  config: RunnerConfig,
+  request: SwapRequest,
+  onTransactionPrepared?: (approvals: ApprovalStep[]) => Promise<void>,
+  onApprovalTransaction?: ActionContext["onApprovalTransaction"],
+): Promise<SwapExecution> {
+  const prepared = await prepareSwapTransaction(wallet, config, request);
 
   // Sell directions move an ERC-20, which the router can only pull through
   // Permit2. Without this a UP->ETH or USDC->ETH quest simply reverts.
   const approvals = await ensureSwapApprovals(
     wallet,
-    route.tokenIn,
+    prepared.route.tokenIn,
     request.amountIn,
-    route.nativeInput,
+    prepared.route.nativeInput,
     onApprovalTransaction,
   );
 
   await onTransactionPrepared?.(approvals);
   const txHash = await wallet.sendTransaction({
-    to: UNISWAP_ADDRESSES.universalRouter as `0x${string}`,
-    data,
-    value,
+    to: prepared.to,
+    data: prepared.data,
+    value: prepared.value,
   });
 
-  return { txHash, approvals, amountOutMin };
+  return { txHash, approvals, amountOutMin: prepared.amountOutMin };
 }
 
 /**

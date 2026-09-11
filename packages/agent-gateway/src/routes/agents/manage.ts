@@ -36,14 +36,14 @@ const createSchema = z
     rewardWallet: z.string().refine(ethers.isAddress),
     capabilities: z.array(z.enum(capabilities)).min(1),
     templateIds: z.array(z.string().uuid()).max(100).default([]),
-    maxFundingSwaps: z.number().int().min(0).max(20).default(10),
+    maxFundingSwaps: z.number().int().min(0).max(32).nullable().default(null),
   })
   .strict();
 
 const updateSchema = z
   .object({
     displayName: z.string().trim().min(2).max(40).optional(),
-    maxFundingSwaps: z.number().int().min(0).max(20).optional(),
+    maxFundingSwaps: z.number().int().min(0).max(32).nullable().optional(),
   })
   .strict()
   .refine(

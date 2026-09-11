@@ -11,7 +11,7 @@ import type { CandidateObservation, CandidateTask } from "./candidates";
 import type { TaskOutcome } from "./brain";
 import type { RunnerConfig } from "./config";
 
-const MAX_STEPS = 32;
+export const MAX_STEPS = 32;
 const executeArgsSchema = z.object({ candidateId: z.string() }).strict();
 const ownerArgsSchema = z
   .object({
@@ -42,6 +42,11 @@ export interface PlannerDeps {
   ): Promise<PlannerExecution>;
   askOwner?(question: OwnerQuestion): Promise<void>;
   maxStateChanges?: number;
+  delegatedSelection?: {
+    candidateId: string;
+    expectedStateVersion: string;
+    fingerprint?: string;
+  };
 }
 
 export interface PlannerResult {
@@ -123,6 +128,7 @@ function publicObservation(observation: CandidateObservation) {
       purpose: candidate.purpose,
       requirements: candidate.analysis.requirements,
       effects: candidate.analysis.effects,
+      economics: candidate.analysis.economics,
       estimatedCostUsd: candidate.estimatedCostUsd,
       usefulEffects: candidate.usefulEffects,
       rank: candidate.rank,
@@ -185,40 +191,6 @@ export async function planAndExecute(
     return execution;
   };
 
-  /**
-   * Execute without the model, but only when that is unambiguous.
-   *
-   * This covers an unusable provider, not a model that already acted or one
-   * that just misbehaved: firing after either would repeat work already on
-   * chain, or act on a turn the planner deliberately refused.
-   */
-  const executeWhileUnambiguous = async () => {
-    if (refusals > 0) {
-      stopCode ??= "PLANNER_PROTOCOL_ERROR";
-      return;
-    }
-    for (let step = 0; step < MAX_STEPS; step += 1) {
-      const observation = latest ?? (await observe());
-      latest = observation;
-      if (observation.candidates.length === 0) return;
-      if (observation.candidates.length > 1) {
-        stopCode = "PLANNER_SELECTION_REQUIRED";
-        return;
-      }
-      if (executedCandidateIds.has(observation.candidates[0]!.candidateId)) {
-        stopCode = "NO_STATE_PROGRESS";
-        return;
-      }
-      await executeOne(observation.candidates[0]!, observation.stateVersion);
-      if (stopForOwner) return;
-      if (actions.length >= maxStateChanges) {
-        stopCode = "CYCLE_BOUND_REACHED";
-        return;
-      }
-    }
-    stopCode = "PLANNER_STEP_LIMIT";
-  };
-
   const result = (): PlannerResult => ({
     outcomes: [...outcomes.values()],
     questions,
@@ -229,9 +201,26 @@ export async function planAndExecute(
     stopCode,
   });
 
+  if (deps.delegatedSelection) {
+    const observation = await observe();
+    latest = observation;
+    if (observation.stateVersion !== deps.delegatedSelection.expectedStateVersion) {
+      return { ...result(), stopCode: "DECISION_STALE" };
+    }
+    const selected = observation.candidates.find(
+      (candidate) => candidate.candidateId === deps.delegatedSelection!.candidateId,
+    );
+    if (!selected) return { ...result(), stopCode: "CANDIDATE_INVALID" };
+    if (selected.expiresAt && Date.parse(selected.expiresAt) <= Date.now()) {
+      return { ...result(), stopCode: "DECISION_STALE" };
+    }
+    await executeOne(selected, observation.stateVersion);
+    return result();
+  }
+
   if (!process.env.OPENROUTER_API_KEY) {
-    await executeWhileUnambiguous();
-    return { ...result(), planned: actions.length > 0 };
+    await observe();
+    return { ...result(), stopCode: "PLANNER_SELECTION_REQUIRED" };
   }
 
   const messages: AIConversationMessage[] = [
@@ -263,7 +252,6 @@ export async function planAndExecute(
       result.toolCalls.length === 0
     ) {
       stopCode = "PLANNER_UNAVAILABLE";
-      await executeWhileUnambiguous();
       break;
     }
 

@@ -139,6 +139,8 @@ describe("paidFetch discount negotiation", () => {
     expect(paidHeaders["PAYMENT-SIGNATURE"]).toBe("signed:600");
     expect(result.discounted).toBe(true);
     expect(result.paid).toBe(true);
+    expect(result.paidAmountRaw).toBe("600");
+    expect(result.savedAmountRaw).toBe(String(BigInt(FULL_PRICE) - 600n));
     expect(result.ok).toBe(true);
   });
 
@@ -174,6 +176,8 @@ describe("paidFetch discount negotiation", () => {
     // The short payment was never settled, so claiming a discount would be a lie.
     expect(result.discounted).toBe(false);
     expect(result.paid).toBe(true);
+    expect(result.paidAmountRaw).toBe(FULL_PRICE);
+    expect(result.savedAmountRaw).toBeUndefined();
   });
 
   it("pays full price and reports no discount when World is not offered", async () => {
@@ -209,6 +213,7 @@ describe("paidFetch discount negotiation", () => {
     ).toBeUndefined();
     expect(result.paid).toBe(false);
     expect(result.discounted).toBe(true);
+    expect(result.paidAmountRaw).toBeUndefined();
   });
 
   it("pays full price without a stale header once a free trial is exhausted", async () => {

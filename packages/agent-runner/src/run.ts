@@ -1,11 +1,15 @@
+import { createHash } from "crypto";
 import { EAS } from "@ethereum-attestation-service/eas-sdk";
 import { ethers } from "ethers";
+import { canonicalize } from "json-canonicalize";
 import { z } from "zod";
+import { actionIdSchema } from "@p2e/agent-contracts";
 import { AgentSession } from "./session";
 import {
   narrateRun,
   type ActionTimelineEntry,
   type RunFacts,
+  type RunSpend,
   type TaskOutcome,
 } from "./brain";
 import { fetchAgentHistory, summarizeHistory } from "./graph";
@@ -21,25 +25,69 @@ import {
 import { actionForTaskType } from "./actions/registry";
 import {
   actionResultSchema,
+  assetAmount,
   resultTxHash,
+  type ActionCandidate,
+  type Asset,
+  type AssetAmount,
   type BoundAction,
 } from "./actions/types";
-import type { AgentWallet } from "./wallet";
+import { spendableEth } from "./balances";
+import { receivedFromLogs, type KnownToken } from "./receipts";
+import { attestationUrlSchema, type QuestCompletion } from "./report-schema";
+import { MAX_STEPS } from "./planner";
+import type { AgentWallet, TransactionLifecycle } from "./wallet";
 import type { RunnerConfig } from "./config";
 
 export interface RunOptions {
   runId?: string;
   dryRun?: boolean;
   restoredTimeline?: ActionTimelineEntry[];
+  restoredSpend?: RunSpend;
   maxStateChanges?: number;
+  decisionAuthority?: "platform_chat" | "delegated_client";
+  delegatedSelection?: {
+    candidateId: string;
+    candidateStateVersion: string;
+    fingerprint: string;
+  };
   onProgress?(progress: {
     actionTimeline: ActionTimelineEntry[];
+    spend: RunSpend;
   }): Promise<void>;
+  transactionLifecycle?(
+    candidate: ActionCandidate,
+    transactionIndex: number,
+  ): TransactionLifecycle;
+  session?: AgentSession;
 }
 
 export interface RunReport extends RunFacts {
   narrative: Awaited<ReturnType<typeof narrateRun>>;
   succeeded: boolean;
+  decisionFrameDraft?: DecisionFrameDraft;
+}
+
+export interface DecisionFrameDraft {
+  stateVersion: string;
+  candidates: Array<{
+    candidateId: `cand_${string}`;
+    stateVersion: string;
+    consequence: {
+      actionId: z.infer<typeof actionIdSchema>;
+      actionVersion: number;
+      target: `0x${string}` | null;
+      spender: `0x${string}` | null;
+      asset: string;
+      tokenAddress: `0x${string}` | null;
+      maxDebitRaw: string;
+      maxGasRaw: string;
+      maxServiceFeeRaw: string;
+    };
+    fingerprint: `0x${string}`;
+    expiresAt: string;
+    description: string;
+  }>;
 }
 
 type QuestTask = {
@@ -56,6 +104,66 @@ type RunCompletion = {
   submission_status?: string;
   reward_claimed?: boolean;
 };
+
+function firstAddress(value: unknown): `0x${string}` | null {
+  if (typeof value === "string" && /^0x[a-fA-F0-9]{40}$/.test(value)) {
+    return value as `0x${string}`;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const address = firstAddress(item);
+      if (address) return address;
+    }
+  } else if (value && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      const address = firstAddress(item);
+      if (address) return address;
+    }
+  }
+  return null;
+}
+
+function decisionDraft(
+  stateVersion: string,
+  candidates: ActionCandidate[],
+): DecisionFrameDraft {
+  const now = Date.now();
+  return {
+    stateVersion,
+    candidates: candidates.map((candidate) => {
+      const principal = candidate.analysis.economics.value.principal;
+      const marketExpiry = candidate.actionName === "p2e_uniswap_swap" ? 60_000 : 300_000;
+      const defaultExpiry = new Date(now + marketExpiry).toISOString();
+      const expiresAt =
+        candidate.expiresAt && Date.parse(candidate.expiresAt) < Date.parse(defaultExpiry)
+          ? candidate.expiresAt
+          : defaultExpiry;
+      const fingerprint = `0x${createHash("sha256")
+        .update(canonicalize(candidate))
+        .digest("hex")}` as `0x${string}`;
+      return {
+        candidateId: candidate.candidateId as `cand_${string}`,
+        stateVersion: candidate.stateVersion,
+        consequence: {
+          actionId: actionIdSchema.parse(candidate.actionName),
+          actionVersion: candidate.actionVersion,
+          target: firstAddress(candidate.input),
+          spender: null,
+          asset: principal?.asset ?? "ETH",
+          tokenAddress:
+            (principal?.tokenAddress as `0x${string}` | null | undefined) ??
+            null,
+          maxDebitRaw: principal?.raw ?? "0",
+          maxGasRaw: candidate.analysis.economics.gas.costRaw ?? "0",
+          maxServiceFeeRaw: "0",
+        },
+        fingerprint,
+        expiresAt,
+        description: candidate.explanation,
+      };
+    }),
+  };
+}
 
 const questListSchema = z
   .object({
@@ -115,12 +223,32 @@ export async function runDailyQuest(
   config: RunnerConfig,
   options: RunOptions = {},
 ): Promise<RunReport> {
-  const session = new AgentSession(wallet, config);
+  const restoredApiSpendRaw = BigInt(options.restoredSpend?.apiSpent.raw ?? "0");
+  const configuredApiCap = config.maxX402PerRunRaw
+    ? BigInt(config.maxX402PerRunRaw)
+    : null;
+  const session =
+    options.session ??
+    new AgentSession(wallet, {
+      ...config,
+      ...(configuredApiCap !== null
+        ? {
+            maxX402PerRunRaw: (
+              configuredApiCap > restoredApiSpendRaw
+                ? configuredApiCap - restoredApiSpendRaw
+                : 0n
+            ).toString(),
+          }
+        : {}),
+    });
   const tasks: TaskOutcome[] = [];
-  let paidCalls = 0;
-  let discountedCalls = 0;
+  let paidCalls = options.restoredSpend?.paidCalls ?? 0;
+  let apiSpentRaw = BigInt(options.restoredSpend?.apiSpent.raw ?? "0");
+  let discountedCalls = options.restoredSpend?.discountedCalls ?? 0;
+  let apiSavedRaw = BigInt(options.restoredSpend?.apiSaved?.raw ?? "0");
   let questCompleted = false;
   let keyTxHash: string | null = null;
+  let completion: RunFacts["completion"];
   let blockingReason: string | undefined;
   let blockingCode: string | undefined;
   let questTitle: string | null = null;
@@ -128,15 +256,142 @@ export async function runDailyQuest(
   let historyNote: string | undefined;
   let runEndsAt: string | null = null;
   let ownerQuestions: OwnerQuestion[] = [];
+  let decisionFrameDraft: DecisionFrameDraft | undefined;
   const timeline: ActionTimelineEntry[] = [...(options.restoredTimeline ?? [])];
+  let startingSpendable: AssetAmount[] =
+    options.restoredSpend?.startingSpendable ?? [];
 
-  const track = <T extends { paid: boolean; discounted: boolean }>(r: T): T => {
+  const track = <
+    T extends {
+      paid: boolean;
+      discounted: boolean;
+      paidAmountRaw?: string;
+      savedAmountRaw?: string;
+    },
+  >(
+    r: T,
+  ): T => {
     if (r.paid) paidCalls += 1;
     if (r.discounted) discountedCalls += 1;
+    if (r.paidAmountRaw) apiSpentRaw += BigInt(r.paidAmountRaw);
+    if (r.savedAmountRaw) apiSavedRaw += BigInt(r.savedAmountRaw);
     return r;
   };
 
+  const currentSpend = (): RunSpend => {
+    const principalRaw: Record<Asset, bigint> = {
+      ETH: 0n,
+      USDC: 0n,
+      UP: 0n,
+      DG: 0n,
+    };
+    let gasSpentRaw = 0n;
+    let fundingSwaps = 0;
+    const candidateIds = new Set<string>();
+    for (const entry of timeline) {
+      if (entry.gasCostRaw) gasSpentRaw += BigInt(entry.gasCostRaw);
+      if (
+        entry.purpose === "prerequisite" &&
+        entry.actionName === "p2e_uniswap_swap" &&
+        (entry.status === "submitted" || entry.status === "confirmed")
+      ) {
+        fundingSwaps += 1;
+      }
+      if (entry.candidateId && !entry.actionName.startsWith("approval:")) {
+        candidateIds.add(entry.candidateId);
+      }
+      if (entry.status === "confirmed" && entry.principal) {
+        principalRaw[entry.principal.asset] += BigInt(entry.principal.raw);
+      }
+    }
+    const maxFundingSwaps = config.maxFundingSwaps ?? null;
+    return {
+      startingSpendable,
+      gasSpent: assetAmount("ETH", gasSpentRaw, 18, null),
+      principalSpent: (["ETH", "USDC", "UP", "DG"] as const)
+        .filter((asset) => principalRaw[asset] > 0n)
+        .map((asset) => {
+          const starting = startingSpendable.find(
+            (amount) => amount.asset === asset,
+          );
+          return assetAmount(
+            asset,
+            principalRaw[asset],
+            starting?.decimals ?? (asset === "USDC" ? 6 : 18),
+            (starting?.tokenAddress as `0x${string}` | null | undefined) ??
+              null,
+          );
+        }),
+      apiSpent: assetAmount("USDC", apiSpentRaw, 6, null),
+      apiSaved: assetAmount("USDC", apiSavedRaw, 6, null),
+      fundingSwaps,
+      paidCalls,
+      discountedCalls,
+      guards: {
+        maxFundingSwaps,
+        fundingSwapsRemaining:
+          maxFundingSwaps === null
+            ? null
+            : Math.max(0, maxFundingSwaps - fundingSwaps),
+        maxSteps: MAX_STEPS,
+        stepsRemaining: Math.max(0, MAX_STEPS - candidateIds.size),
+      },
+    };
+  };
+
+  const knownTokens = (): KnownToken[] =>
+    startingSpendable.flatMap((amount) =>
+      amount.tokenAddress
+        ? [
+            {
+              asset: amount.asset,
+              tokenAddress: amount.tokenAddress as `0x${string}`,
+              decimals: amount.decimals,
+            },
+          ]
+        : [],
+    );
+
+  const hydrateReceipts = async () => {
+    const tokens = knownTokens();
+    await Promise.all(
+      timeline.map(async (entry) => {
+        const wantsReceived =
+          entry.status === "confirmed" &&
+          entry.received === undefined &&
+          !entry.actionName.startsWith("approval:") &&
+          tokens.length > 0;
+        if (!entry.txHash || (entry.gasCostRaw && !wantsReceived)) return;
+        try {
+          const receipt = await wallet.publicClient.getTransactionReceipt({
+            hash: entry.txHash as `0x${string}`,
+          });
+          if (
+            !entry.gasCostRaw &&
+            typeof receipt.gasUsed === "bigint" &&
+            typeof receipt.effectiveGasPrice === "bigint"
+          ) {
+            entry.gasCostRaw = (
+              receipt.gasUsed * receipt.effectiveGasPrice
+            ).toString();
+          }
+          if (wantsReceived && Array.isArray(receipt.logs)) {
+            entry.received = receivedFromLogs(
+              receipt.logs,
+              wallet.address,
+              tokens,
+              entry.principal?.asset,
+            );
+          }
+        } catch {
+          return;
+        }
+      }),
+    );
+  };
+
   const finish = async (): Promise<RunReport> => {
+    await hydrateReceipts();
     const facts: RunFacts = {
       runId,
       questTitle,
@@ -145,6 +400,7 @@ export async function runDailyQuest(
       tasks,
       questCompleted,
       keyTxHash,
+      completion,
       totalPaidCalls: paidCalls,
       discountedCalls,
       blockingReason,
@@ -153,6 +409,7 @@ export async function runDailyQuest(
       historyNote,
       ownerQuestions: ownerQuestions.length ? ownerQuestions : undefined,
       actionTimeline: timeline.length ? timeline : undefined,
+      spend: currentSpend(),
     };
     const narrative = await narrateRun(config, facts);
     // A run that skipped everything did nothing; reporting it as a success is
@@ -167,7 +424,12 @@ export async function runDailyQuest(
       tasks.some((t) => t.status === "completed" || t.status === "claimed") &&
       !blockingCode;
 
-    const report: RunReport = { ...facts, narrative, succeeded };
+    const report: RunReport = {
+      ...facts,
+      narrative,
+      succeeded,
+      ...(decisionFrameDraft ? { decisionFrameDraft } : {}),
+    };
     if (!options.dryRun) await publishReport(session, report);
     return report;
   };
@@ -267,6 +529,23 @@ export async function runDailyQuest(
       tasks: preflightTasks,
       settledTaskIds,
     });
+    if (startingSpendable.length === 0) {
+      startingSpendable = preflight.balances.map((balance) =>
+        balance.asset === "ETH"
+          ? assetAmount(
+              "ETH",
+              spendableEth(
+                BigInt(balance.raw),
+                config.minNativeReserveRaw
+                  ? BigInt(config.minNativeReserveRaw)
+                  : undefined,
+              ).spendable,
+              balance.decimals,
+              null,
+            )
+          : balance,
+      );
+    }
     if (preflight.fatalBlockers.length > 0) {
       const blocker = preflight.fatalBlockers[0]!;
       blockingCode = blocker.code;
@@ -381,7 +660,12 @@ export async function runDailyQuest(
     );
     tasks.push(
       recovered.ok
-        ? { ...base, status: "claimed", rewardAmount: recovered.rewardAmount }
+        ? {
+            ...base,
+            status: "claimed",
+            rewardAmount: recovered.rewardAmount,
+            ...attestationOf(recovered),
+          }
         : {
             ...base,
             status: "reward_pending",
@@ -404,7 +688,10 @@ export async function runDailyQuest(
         "Check the agent wallet's recent activity. Retry only if the prepared transaction was not broadcast.",
       blockedTaskId: uncertainBroadcast.taskId,
     });
-    await options.onProgress?.({ actionTimeline: [...timeline] });
+    await options.onProgress?.({
+      actionTimeline: [...timeline],
+      spend: currentSpend(),
+    });
     return finish();
   }
 
@@ -426,19 +713,28 @@ export async function runDailyQuest(
     } catch {
       blockingCode = "TX_CONFIRMATION_PENDING";
       blockingReason = `Transaction ${entry.txHash} is not final yet, so the agent will wait instead of replacing it.`;
-      await options.onProgress?.({ actionTimeline: [...timeline] });
+      await options.onProgress?.({
+        actionTimeline: [...timeline],
+        spend: currentSpend(),
+      });
       return finish();
     }
 
     if (receipt.status !== "success") {
       entry.status = "reverted";
       entry.detail = "The submitted transaction reverted on-chain.";
-      await options.onProgress?.({ actionTimeline: [...timeline] });
+      await options.onProgress?.({
+        actionTimeline: [...timeline],
+        spend: currentSpend(),
+      });
       continue;
     }
 
     entry.status = "confirmed";
-    await options.onProgress?.({ actionTimeline: [...timeline] });
+    await options.onProgress?.({
+      actionTimeline: [...timeline],
+      spend: currentSpend(),
+    });
     if (entry.purpose !== "quest_task" || settledTaskIds.has(entry.taskId)) {
       continue;
     }
@@ -495,11 +791,13 @@ export async function runDailyQuest(
   // Read once, after the run is entered: it costs a paid query, and it is
   // context for the report rather than an input to any decision.
   let historyContext: Awaited<ReturnType<typeof fetchAgentHistory>> | undefined;
-  try {
-    historyContext = await fetchAgentHistory(wallet, config, track);
-    historyNote = summarizeHistory(historyContext) ?? undefined;
-  } catch {
-    // Memory is a nicety; a run must never fail for want of it.
+  if (options.decisionAuthority !== "delegated_client") {
+    try {
+      historyContext = await fetchAgentHistory(wallet, config, track);
+      historyNote = summarizeHistory(historyContext) ?? undefined;
+    } catch {
+      // Memory is a nicety; a run must never fail for want of it.
+    }
   }
 
   const executable = plan.filter(
@@ -519,6 +817,39 @@ export async function runDailyQuest(
   // action until the budget is gone.
   const rejectedCandidateIds = new Set<string>();
 
+  const observe = () =>
+    observeCandidates({
+      wallet,
+      config,
+      tasks: candidateTasks,
+      settledTaskIds,
+      rejectedCandidateIds,
+    });
+
+  if (
+    options.decisionAuthority === "delegated_client" &&
+    !options.delegatedSelection &&
+    executable.length > 0
+  ) {
+    const observation = await observe();
+    if (observation.candidates.length > 0) {
+      decisionFrameDraft = decisionDraft(
+        observation.stateVersion,
+        observation.candidates,
+      );
+      blockingCode = "EXTERNAL_DECISION_REQUIRED";
+      blockingReason =
+        "The external client must choose one current candidate before funds are used.";
+      ownerQuestions = [
+        {
+          question: "Choose one candidate from the current decision frame.",
+          blockedTaskId: null,
+        },
+      ];
+      return finish();
+    }
+  }
+
   // The agent sequences the run itself: one wallet has to satisfy several
   // tasks that spend different tokens, so the order — and any swap needed to
   // afford a later task — is reasoning, not a fixed list.
@@ -530,15 +861,47 @@ export async function runDailyQuest(
           maxStateChanges: options.maxStateChanges ?? 1,
           tasks: candidateTasks,
           historyContext,
-          observe: () =>
-            observeCandidates({
-              wallet,
-              config,
-              tasks: candidateTasks,
-              settledTaskIds,
-              rejectedCandidateIds,
-            }),
+          observe,
+          ...(options.decisionAuthority === "delegated_client" &&
+          options.delegatedSelection
+            ? {
+                delegatedSelection: {
+                  candidateId: options.delegatedSelection.candidateId,
+                  expectedStateVersion:
+                    options.delegatedSelection.candidateStateVersion,
+                  fingerprint: options.delegatedSelection.fingerprint,
+                },
+              }
+            : {}),
           executeCandidate: async (candidate, expectedStateVersion) => {
+            let transactionIndex = 0;
+            const transactionLifecycles = new Map<
+              `0x${string}`,
+              TransactionLifecycle
+            >();
+            const scopedWallet: AgentWallet = options.transactionLifecycle
+              ? {
+                  ...wallet,
+                  async sendTransaction(tx) {
+                    const lifecycle = options.transactionLifecycle!(
+                      candidate,
+                      transactionIndex++,
+                    );
+                    const hash = await wallet.sendTransaction(tx, lifecycle);
+                    transactionLifecycles.set(hash, lifecycle);
+                    return hash;
+                  },
+                  async waitForReceipt(hash) {
+                    const receipt = await wallet.waitForReceipt(hash);
+                    await transactionLifecycles.get(hash)?.reconciled?.({
+                      transactionHash: hash,
+                      status: receipt.status,
+                      gasCostRaw: receipt.gasCostRaw,
+                    });
+                    return receipt;
+                  },
+                }
+              : wallet;
             let timelineIndex = -1;
             const fundingSwaps = timeline.filter(
               (entry) =>
@@ -546,19 +909,21 @@ export async function runDailyQuest(
                 entry.actionName === "p2e_uniswap_swap" &&
                 (entry.status === "submitted" || entry.status === "confirmed"),
             ).length;
+            const fundingLimit = config.maxFundingSwaps;
             let result =
+              typeof fundingLimit === "number" &&
               candidate.purpose.kind === "prerequisite" &&
               candidate.actionName === "p2e_uniswap_swap" &&
-              fundingSwaps >= (config.maxFundingSwaps ?? 10)
+              fundingSwaps >= fundingLimit
                 ? actionResultSchema.parse({
                     status: "owner_required",
                     code: "FUNDING_SWAP_LIMIT",
-                    message: `The run reached its ${config.maxFundingSwaps ?? 10}-swap preparation budget.`,
+                    message: `The run reached its ${fundingLimit}-swap preparation budget.`,
                   })
                 : await executeBoundCandidate({
                     candidate,
                     expectedStateVersion,
-                    wallet,
+                    wallet: scopedWallet,
                     config,
                     onTransactionPrepared: async () => {
                       timelineIndex =
@@ -571,10 +936,17 @@ export async function runDailyQuest(
                               ? candidate.purpose.taskId
                               : candidate.purpose.forTaskId,
                           status: "broadcasting",
+                          ...(candidate.analysis.economics?.value.principal
+                            ? {
+                                principal:
+                                  candidate.analysis.economics.value.principal,
+                              }
+                            : {}),
                         }) - 1;
                       try {
                         await options.onProgress?.({
                           actionTimeline: [...timeline],
+                          spend: currentSpend(),
                         });
                       } catch (error) {
                         timeline.splice(timelineIndex, 1);
@@ -605,6 +977,7 @@ export async function runDailyQuest(
                       else timeline.push(entry);
                       await options.onProgress?.({
                         actionTimeline: [...timeline],
+                        spend: currentSpend(),
                       });
                     },
                     onTransactionSubmitted: async ({ txHash }) => {
@@ -618,6 +991,12 @@ export async function runDailyQuest(
                             : candidate.purpose.forTaskId,
                         status: "submitted",
                         txHash,
+                        ...(candidate.analysis.economics?.value.principal
+                          ? {
+                              principal:
+                                candidate.analysis.economics.value.principal,
+                            }
+                          : {}),
                       };
                       if (timelineIndex >= 0) {
                         timeline[timelineIndex] = submittedEntry;
@@ -626,6 +1005,7 @@ export async function runDailyQuest(
                       }
                       await options.onProgress?.({
                         actionTimeline: [...timeline],
+                        spend: currentSpend(),
                       });
                     },
                   });
@@ -650,6 +1030,11 @@ export async function runDailyQuest(
                   ? candidate.purpose.taskId
                   : candidate.purpose.forTaskId,
               status: result.status,
+              ...(candidate.analysis.economics?.value.principal
+                ? {
+                    principal: candidate.analysis.economics.value.principal,
+                  }
+                : {}),
               ...(txHash ? { txHash } : {}),
               ...("message" in result ? { detail: result.message } : {}),
             } satisfies ActionTimelineEntry;
@@ -659,7 +1044,11 @@ export async function runDailyQuest(
                   ? prepared
                   : entry;
             else timeline.push(entry);
-            await options.onProgress?.({ actionTimeline: [...timeline] });
+            await hydrateReceipts();
+            await options.onProgress?.({
+              actionTimeline: [...timeline],
+              spend: currentSpend(),
+            });
 
             // A candidate that changed nothing must not be offered again, or the
             // planner can pick it forever without the run ever advancing.
@@ -763,7 +1152,9 @@ export async function runDailyQuest(
     // One ordered cause drives both fields. Resolved separately they drift, and a
     // report reading FUNDING_SWAP_LIMIT above prose that mentions no limit sends
     // the owner looking for a fault that is really a budget they chose.
-    const cause: { code?: string; message?: string; detail?: string } | undefined =
+    const cause:
+      | { code?: string; message?: string; detail?: string }
+      | undefined =
       planned?.ownerBlockers[0] ??
       planned?.fatalBlockers[0] ??
       (planned?.stopCode ? { code: planned.stopCode } : undefined) ??
@@ -786,7 +1177,15 @@ export async function runDailyQuest(
 
   if (finished.ok) {
     const parsed = z
-      .object({ transactionHash: z.string().optional() })
+      .object({
+        transactionHash: z.string().optional(),
+        completionBonusGranted: z.number().finite().nonnegative().optional(),
+        rewardWallet: z
+          .string()
+          .regex(/^0x[a-fA-F0-9]{40}$/)
+          .nullable()
+          .optional(),
+      })
       .passthrough()
       .safeParse(finished.data ?? {});
     if (!parsed.success) {
@@ -796,6 +1195,10 @@ export async function runDailyQuest(
     }
     questCompleted = true;
     keyTxHash = parsed.data.transactionHash ?? null;
+    completion = {
+      bonusAmount: parsed.data.completionBonusGranted ?? 0,
+      rewardWallet: parsed.data.rewardWallet ?? null,
+    };
   } else {
     blockingCode = finished.code;
     blockingReason = `Tasks are done but the quest could not be finalized: ${finished.message ?? finished.code}`;
@@ -984,9 +1387,45 @@ async function settleQuestTask(args: {
     status: "claimed",
     ...(txHash ? { txHash } : {}),
     rewardAmount: claimed.rewardAmount,
+    ...attestationOf(claimed),
     marketNote,
   };
 }
+
+function attestationOf(
+  claim: ClaimResult,
+): Pick<TaskOutcome, "attestationUid" | "attestationUrl"> {
+  return {
+    ...(claim.attestationUid ? { attestationUid: claim.attestationUid } : {}),
+    ...(claim.attestationUrl ? { attestationUrl: claim.attestationUrl } : {}),
+  };
+}
+
+type ClaimResult = {
+  ok: boolean;
+  code?: string;
+  detail?: string;
+  rewardAmount?: number;
+  attestationUid?: string;
+  attestationUrl?: string;
+};
+
+const claimDataSchema = z
+  .object({
+    rewardAmount: z.number().finite().optional(),
+    // A malformed proof field must not cost the owner the reward amount.
+    attestationUid: z
+      .string()
+      .regex(/^0x[a-fA-F0-9]{64}$/)
+      .nullable()
+      .optional()
+      .catch(undefined),
+    attestationScanUrl: attestationUrlSchema
+      .nullable()
+      .optional()
+      .catch(undefined),
+  })
+  .passthrough();
 
 const CLAIM_ATTEMPTS = 3;
 const CLAIM_BACKOFF_MS = [1_000, 4_000];
@@ -1015,12 +1454,7 @@ async function claimReward(
   config: RunnerConfig,
   completionId: string,
   track: <T extends { paid: boolean; discounted: boolean }>(r: T) => T,
-): Promise<{
-  ok: boolean;
-  code?: string;
-  detail?: string;
-  rewardAmount?: number;
-}> {
+): Promise<ClaimResult> {
   const idempotencyKey = `claim:${completionId}`;
 
   // Retried, because the reward is only claimable while the run window is open
@@ -1054,6 +1488,23 @@ async function claimReward(
     return last;
   };
 
+  const readClaim = (
+    result: Awaited<ReturnType<typeof submitClaim>>,
+  ): ClaimResult => {
+    const parsed = claimDataSchema.safeParse(result.data ?? {});
+    const data = parsed.success ? parsed.data : {};
+    return {
+      ok: result.ok,
+      code: result.code,
+      detail: result.message,
+      rewardAmount: data.rewardAmount,
+      ...(data.attestationUid ? { attestationUid: data.attestationUid } : {}),
+      ...(data.attestationScanUrl
+        ? { attestationUrl: data.attestationScanUrl }
+        : {}),
+    };
+  };
+
   const intentResponse = track(
     await session.call<Record<string, unknown>>(
       `/api/agent/v1/tasks/claim/${completionId}/intent`,
@@ -1062,17 +1513,7 @@ async function claimReward(
 
   // Nothing to attest on this deployment, so the claim stands on its own.
   if (intentResponse.code === "EAS_DISABLED") {
-    const unsigned = await submitClaim();
-    const parsed = z
-      .object({ rewardAmount: z.number().finite().optional() })
-      .passthrough()
-      .safeParse(unsigned.data ?? {});
-    return {
-      ok: unsigned.ok,
-      code: unsigned.code,
-      detail: unsigned.message,
-      rewardAmount: parsed.success ? parsed.data.rewardAmount : undefined,
-    };
+    return readClaim(await submitClaim());
   }
 
   const parsedIntent = z
@@ -1170,16 +1611,7 @@ async function claimReward(
       network: String(intent.network),
     });
 
-    const parsed = z
-      .object({ rewardAmount: z.number().finite().optional() })
-      .passthrough()
-      .safeParse(submitted.data ?? {});
-    return {
-      ok: submitted.ok,
-      code: submitted.code,
-      detail: submitted.message,
-      rewardAmount: parsed.success ? parsed.data.rewardAmount : undefined,
-    };
+    return readClaim(submitted);
   } catch (error) {
     return {
       ok: false,
@@ -1220,6 +1652,14 @@ async function publishReport(
         discountedCalls: report.discountedCalls,
         blockingReason: report.blockingReason ?? null,
         ownerQuestions: report.ownerQuestions ?? [],
+        spend: report.spend,
+        completion: report.questCompleted
+          ? ({
+              txHash: report.keyTxHash ?? null,
+              bonusAmount: report.completion?.bonusAmount ?? 0,
+              rewardWallet: report.completion?.rewardWallet ?? null,
+            } satisfies QuestCompletion)
+          : null,
       },
     });
   } catch {

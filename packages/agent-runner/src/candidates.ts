@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { formatUnits } from "viem";
+import { formatUnits, parseUnits } from "viem";
 import {
   DEFAULT_SLIPPAGE_BPS,
   FEE_CONFIG,
@@ -7,6 +7,8 @@ import {
 } from "@/lib/uniswap/constants";
 import { quoteSwapRoute, resolveSwapRoute } from "@/lib/uniswap/route";
 import { actionByName, actionForTaskType } from "./actions/registry";
+import { getBaseMainnetTokenAddresses } from "@/lib/wallet/tokenAddresses";
+import { priceFor } from "@/packages/agent-gateway/src/payments/pricing";
 import { qualifyingBuyForPoints, upRequiredForDg } from "./actions/vendor";
 import {
   actionCandidateSchema,
@@ -15,6 +17,7 @@ import {
   type ActionAnalysis,
   type ActionCandidate,
   type ActionContext,
+  type ReadOnlyAgentWallet,
   type ActionPurpose,
   type Asset,
   type RequirementReference,
@@ -56,6 +59,7 @@ const assetDecimals: Record<Asset, number> = {
 function tokenFor(asset: Asset): `0x${string}` | null {
   if (asset === "USDC") return UNISWAP_ADDRESSES.usdc;
   if (asset === "UP") return UNISWAP_ADDRESSES.up;
+  if (asset === "DG") return getBaseMainnetTokenAddresses().dg ?? null;
   return null;
 }
 
@@ -124,7 +128,7 @@ function grossUpForOutputCosts(amount: bigint, slippageBps: number): bigint {
 }
 
 async function amountInForOutput(args: {
-  wallet: AgentWallet;
+  wallet: ReadOnlyAgentWallet;
   pair: "ETH_UP" | "UP_USDC";
   direction: "A_TO_B" | "B_TO_A";
   maximum: bigint;
@@ -189,7 +193,7 @@ async function analyzeCandidate(args: {
   actionName: string;
   input: Record<string, unknown>;
   purpose: ActionPurpose;
-  wallet: AgentWallet;
+  wallet: ReadOnlyAgentWallet;
   config: RunnerConfig;
   stateVersion: string;
   explanation: string;
@@ -241,7 +245,7 @@ async function analyzeCandidate(args: {
 }
 
 interface PrerequisiteArgs {
-  wallet: AgentWallet;
+  wallet: ReadOnlyAgentWallet;
   config: RunnerConfig;
   balances: WalletBalances;
   stateVersion: string;
@@ -257,6 +261,13 @@ interface PrerequisiteArgs {
  * a protocol whose funding path loops would otherwise be free to do so.
  */
 const MAX_PREREQUISITE_DEPTH = 10;
+const QUEST_TASK_API_COST_USD = formatUnits(
+  ["tasks.complete", "tasks.claim.intent", "tasks.claim"].reduce(
+    (total, routeId) => total + parseUnits(priceFor(routeId).slice(1), 6),
+    0n,
+  ),
+  6,
+);
 
 export async function prerequisiteCandidates(
   args: PrerequisiteArgs,
@@ -361,7 +372,12 @@ async function swapFundingCandidates(
   deficit: bigint,
 ): Promise<ActionCandidate[]> {
   const slippageBps = args.config.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
-  const ethAvailable = spendableEth(args.balances.ETH);
+  const ethAvailable = spendableEth(
+    args.balances.ETH,
+    args.config.minNativeReserveRaw
+      ? BigInt(args.config.minNativeReserveRaw)
+      : undefined,
+  ).spendable;
   const sources = [
     {
       pair: "ETH_UP" as const,
@@ -425,7 +441,7 @@ async function swapFundingCandidates(
 }
 
 export async function observeCandidates(args: {
-  wallet: AgentWallet;
+  wallet: ReadOnlyAgentWallet;
   config: RunnerConfig;
   tasks: CandidateTask[];
   settledTaskIds?: ReadonlySet<string>;
@@ -503,7 +519,7 @@ export async function observeCandidates(args: {
         input: inputRecord,
         analysis,
         stateVersion: version,
-        estimatedCostUsd: null,
+        estimatedCostUsd: QUEST_TASK_API_COST_USD,
         usefulEffects: 1,
         rank: 1,
         explanation: `Complete quest task “${task.title}”.`,

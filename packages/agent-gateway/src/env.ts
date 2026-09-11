@@ -8,6 +8,58 @@ export const AGENT_GRANT_TTL_SECONDS = 900;
 export const AGENT_CHAIN_ID = 8453;
 export const AGENT_NETWORK = "eip155:8453" as const;
 
+export function headlessAgentAuthEnabled(): boolean {
+  return process.env.HEADLESS_AGENT_AUTH_ENABLED === "true";
+}
+
+export function headlessAgentApiEnabled(): boolean {
+  return process.env.HEADLESS_AGENT_API_ENABLED === "true";
+}
+
+export function headlessAgentMcpEnabled(): boolean {
+  return process.env.HEADLESS_AGENT_MCP_ENABLED === "true";
+}
+
+export function headlessAgentResource(): string {
+  const configured = process.env.HEADLESS_AGENT_RESOURCE?.trim();
+  if (configured) return new URL(configured).toString().replace(/\/$/, "");
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("HEADLESS_AGENT_RESOURCE is required in production");
+  }
+  return `${agentAudienceOrigin()}/api/agent-control`;
+}
+
+export function headlessAgentIssuer(): string {
+  return process.env.HEADLESS_AGENT_ISSUER?.trim() || agentAudienceOrigin();
+}
+
+export function headlessCredentialPepperKeyring(): {
+  currentKid: string;
+  peppers: ReadonlyMap<string, string>;
+} {
+  const currentKid = process.env.HEADLESS_AGENT_CREDENTIAL_PEPPER_KID?.trim();
+  const raw = process.env.HEADLESS_AGENT_CREDENTIAL_PEPPERS?.trim();
+  if (currentKid && raw) {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const entries = Object.entries(parsed).filter(
+      (entry): entry is [string, string] =>
+        typeof entry[1] === "string" && entry[1].length >= 32,
+    );
+    const peppers = new Map(entries);
+    if (!peppers.has(currentKid)) {
+      throw new Error("The active credential pepper kid is not configured");
+    }
+    return { currentKid, peppers };
+  }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("Headless credential peppers are required in production");
+  }
+  return {
+    currentKid: "dev-v1",
+    peppers: new Map([["dev-v1", "dev-only-headless-agent-pepper-32-bytes"]]),
+  };
+}
+
 export function agentSessionSecret(): Uint8Array {
   const secret = process.env.AGENT_SESSION_JWT_SECRET;
   if (!secret) {

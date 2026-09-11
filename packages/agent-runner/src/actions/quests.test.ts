@@ -11,13 +11,15 @@ import { resultTxHash, type ActionContext } from "./types";
 const sendTransaction = jest.fn();
 const waitForReceipt = jest.fn();
 const getBlockNumber = jest.fn();
+const estimateGas = jest.fn();
+const getGasPrice = jest.fn();
 
 const AGENT = "0x0000000000000000000000000000000000000a9e";
 
 const ctx = {
   wallet: {
     address: AGENT,
-    publicClient: { getBlockNumber },
+    publicClient: { getBlockNumber, estimateGas, getGasPrice },
     sendTransaction: (...args: unknown[]) => sendTransaction(...args),
     waitForReceipt: (...args: unknown[]) => waitForReceipt(...args),
   },
@@ -33,6 +35,8 @@ const baseConfig = {
 beforeEach(() => {
   jest.clearAllMocks();
   getBlockNumber.mockResolvedValue(100n);
+  estimateGas.mockResolvedValue(250_000n);
+  getGasPrice.mockResolvedValue(1_000_000n);
   sendTransaction.mockResolvedValue(`0x${"11".repeat(32)}`);
   waitForReceipt.mockResolvedValue({ status: "success" });
 });
@@ -123,6 +127,12 @@ describe("deploy_lock", () => {
 
     expect(analysis.executableNow).toBe(true);
     expect(analysis.requirements).toEqual([]);
+    expect(analysis.economics!.gas).toMatchObject({
+      estimateRaw: "250000",
+      priceRaw: "1000000",
+      costRaw: "250000000000",
+      method: "measured",
+    });
   });
 
   it("signs only for Base mainnet", () => {
@@ -151,6 +161,7 @@ describe("daily_checkin", () => {
 
     expect(analysis.executableNow).toBe(true);
     expect(analysis.gasEstimateRaw).toBe("0");
+    expect(analysis.economics!.gas.method).toBe("measured");
     expect(analysis.blockers).toEqual([]);
   });
 });

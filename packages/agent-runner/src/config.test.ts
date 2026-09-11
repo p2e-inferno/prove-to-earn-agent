@@ -52,6 +52,22 @@ describe("loadConfig wallet provider", () => {
     expect(() => loadConfig()).toThrow(/AGENT_MAX_FUNDING_SWAPS/);
   });
 
+  it("treats an omitted funding-swap budget as uncapped", () => {
+    process.env.AGENT_WALLET_PROVIDER = "local";
+    process.env.AGENT_PRIVATE_KEY = "0x01";
+    delete process.env.AGENT_MAX_FUNDING_SWAPS;
+
+    expect(loadConfig().maxFundingSwaps).toBeNull();
+  });
+
+  it("rejects a funding-swap budget above the planner bound", () => {
+    process.env.AGENT_WALLET_PROVIDER = "local";
+    process.env.AGENT_PRIVATE_KEY = "0x01";
+    process.env.AGENT_MAX_FUNDING_SWAPS = "33";
+
+    expect(() => loadConfig()).toThrow(/AGENT_MAX_FUNDING_SWAPS/);
+  });
+
   it("uses the platform OpenRouter model for hosted agents", () => {
     delete process.env.AGENT_LLM_MODEL;
     process.env.OPENROUTER_DEFAULT_MODEL = "provider/platform-model";

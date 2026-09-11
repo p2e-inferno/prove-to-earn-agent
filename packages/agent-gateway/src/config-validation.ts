@@ -48,7 +48,7 @@ export function validateAgentPlatformConfig() {
   try {
     loadPlatformConfig({
       providerAccountName: "readiness",
-      maxFundingSwaps: 10,
+      maxFundingSwaps: null,
     });
   } catch {
     runnerValid = false;

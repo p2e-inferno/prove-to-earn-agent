@@ -1,5 +1,6 @@
-import { formatUnits, type Address, type Hex } from "viem";
+import { type Address, type Hex } from "viem";
 import { z, type ZodType } from "zod";
+import { formatAmount } from "@/lib/vendor/math";
 import type { RunnerConfig } from "../config";
 import type { AgentWallet } from "../wallet";
 
@@ -21,6 +22,57 @@ export const assetAmountSchema = z
   .strict();
 export type AssetAmount = z.infer<typeof assetAmountSchema>;
 
+export const actionEconomicsSchema = z
+  .object({
+    gas: z
+      .object({
+        estimateRaw: z.string().regex(/^\d+$/).nullable(),
+        priceRaw: z.string().regex(/^\d+$/).nullable(),
+        costRaw: z.string().regex(/^\d+$/).nullable(),
+        costUsd: z.string().nullable(),
+        method: z.enum(["measured", "unavailable"]),
+        scope: z.literal("primary_transaction"),
+      })
+      .strict(),
+    value: z
+      .object({
+        principal: assetAmountSchema.nullable(),
+        expectedOutput: assetAmountSchema.nullable(),
+        minimumOutput: assetAmountSchema.nullable(),
+        feeBps: z.number().int().min(0).max(10_000).nullable(),
+      })
+      .strict(),
+    api: z
+      .object({ routeId: z.string().min(1), priceUsd: z.string() })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type ActionEconomics = z.infer<typeof actionEconomicsSchema>;
+
+const unavailableActionEconomics: ActionEconomics = {
+  gas: {
+    estimateRaw: null,
+    priceRaw: null,
+    costRaw: null,
+    costUsd: null,
+    method: "unavailable",
+    scope: "primary_transaction",
+  },
+  value: {
+    principal: null,
+    expectedOutput: null,
+    minimumOutput: null,
+    feeBps: null,
+  },
+  api: null,
+};
+
+// Truncated display precision prevents UI and model callers from overstating amounts.
+export function displayAmount(raw: bigint, decimals: number): string {
+  return formatAmount(raw, decimals, decimals >= 18 ? 6 : 2);
+}
+
 export function assetAmount(
   asset: Asset,
   raw: bigint,
@@ -32,7 +84,7 @@ export function assetAmount(
     tokenAddress,
     decimals,
     raw: raw.toString(),
-    formatted: formatUnits(raw, decimals),
+    formatted: displayAmount(raw, decimals),
   });
 }
 
@@ -110,6 +162,7 @@ export const actionAnalysisSchema = z
     ),
     blockers: z.array(blockerSchema),
     gasEstimateRaw: z.string().regex(/^\d+$/).nullable(),
+    economics: actionEconomicsSchema.default(unavailableActionEconomics),
     quote: z
       .object({
         source: z.enum(["rpc", "contract", "task_config", "none"]),
@@ -121,6 +174,65 @@ export const actionAnalysisSchema = z
   })
   .strict();
 export type ActionAnalysis = z.infer<typeof actionAnalysisSchema>;
+
+export function actionValue(
+  principal: AssetAmount | null = null,
+  expectedOutput: AssetAmount | null = null,
+  minimumOutput: AssetAmount | null = null,
+  feeBps: number | null = null,
+): ActionEconomics["value"] {
+  return { principal, expectedOutput, minimumOutput, feeBps };
+}
+
+export function actionEconomics(
+  gas: ActionEconomics["gas"],
+  value: ActionEconomics["value"] = actionValue(),
+): ActionEconomics {
+  return { gas, value, api: null };
+}
+
+export function zeroGasEconomics(): ActionEconomics["gas"] {
+  return {
+    estimateRaw: "0",
+    priceRaw: "0",
+    costRaw: "0",
+    costUsd: "0",
+    method: "measured",
+    scope: "primary_transaction",
+  };
+}
+
+export async function estimateActionGas(
+  wallet: ReadOnlyAgentWallet,
+  transaction: { to: Address; data: Hex; value?: bigint },
+): Promise<ActionEconomics["gas"]> {
+  const [estimate, price] = await Promise.all([
+    Promise.resolve()
+      .then(() =>
+        wallet.publicClient.estimateGas({
+          account: wallet.address,
+          to: transaction.to,
+          data: transaction.data,
+          value: transaction.value ?? 0n,
+        }),
+      )
+      .catch(() => null),
+    Promise.resolve()
+      .then(() => wallet.publicClient.getGasPrice())
+      .catch(() => null),
+  ]);
+  return {
+    estimateRaw: estimate?.toString() ?? null,
+    priceRaw: price?.toString() ?? null,
+    costRaw:
+      estimate !== null && price !== null
+        ? (estimate * price).toString()
+        : null,
+    costUsd: null,
+    method: estimate !== null && price !== null ? "measured" : "unavailable",
+    scope: "primary_transaction",
+  };
+}
 
 // Typed as `Hex` rather than `string` so a parsed result is directly usable by
 // viem without a cast, and so no separate compat type has to restate it.
@@ -265,6 +377,18 @@ export interface ActionContext {
   }): Promise<void>;
 }
 
+export type ReadOnlyAgentWallet = Pick<
+  AgentWallet,
+  "address" | "publicClient" | "caip2"
+>;
+
+export interface AnalyzeContext {
+  wallet: ReadOnlyAgentWallet;
+  config: RunnerConfig;
+  purpose: ActionPurpose;
+  stateVersion: string;
+}
+
 export interface ActionDefinition<
   TInput,
   TAnalysis extends ActionAnalysis = ActionAnalysis,
@@ -274,11 +398,11 @@ export interface ActionDefinition<
   description: string;
   taskTypes: readonly string[];
   inputSchema: ZodType<TInput>;
-  analysisSchema: ZodType<TAnalysis>;
+  analysisSchema: ZodType<TAnalysis, z.ZodTypeDef, unknown>;
   resultSchema: ZodType<ActionResult>;
   parseTaskConfig(taskConfig: unknown): TInput;
   supportsNetwork(chainId: number): boolean;
-  analyze(context: ActionContext, input: TInput): Promise<TAnalysis>;
+  analyze(context: AnalyzeContext, input: TInput): Promise<TAnalysis>;
   execute(context: ActionContext, input: TInput): Promise<ActionResult>;
 }
 
@@ -288,12 +412,12 @@ export interface BoundAction {
   description: string;
   taskTypes: readonly string[];
   inputSchema?: ZodType<unknown>;
-  analysisSchema?: ZodType<ActionAnalysis>;
+  analysisSchema?: ZodType<ActionAnalysis, z.ZodTypeDef, unknown>;
   resultSchema?: ZodType<ActionResult>;
   parse(taskConfig: unknown): ParsedInput<unknown>;
   parseTaskConfig(taskConfig: unknown): unknown;
   supportsNetwork(chainId: number): boolean;
-  analyze?(context: ActionContext, input: unknown): Promise<ActionAnalysis>;
+  analyze?(context: AnalyzeContext, input: unknown): Promise<ActionAnalysis>;
   preflight?(
     context: Omit<ActionContext, "purpose" | "stateVersion">,
     input: unknown,

@@ -1,4 +1,8 @@
-import { paidFetch, type PaidFetchResult } from "./paid-fetch";
+import {
+  paidFetch,
+  type PaidFetchResult,
+  type X402PaymentLifecycle,
+} from "./paid-fetch";
 import { z } from "zod";
 import type { AgentWallet } from "./wallet";
 import type { RunnerConfig } from "./config";
@@ -7,11 +11,21 @@ export class AgentSession {
   private token: string | null = null;
   private expiresAtMs = 0;
   private currentExecutionMode: "owner_invoked" | "scheduled" | null = null;
+  private paymentRemainingRaw: bigint | null;
+  private paymentLifecycle: X402PaymentLifecycle | undefined;
 
   constructor(
     private readonly wallet: AgentWallet,
     private readonly config: RunnerConfig,
-  ) {}
+  ) {
+    this.paymentRemainingRaw = config.maxX402PerRunRaw
+      ? BigInt(config.maxX402PerRunRaw)
+      : null;
+  }
+
+  setPaymentLifecycle(lifecycle: X402PaymentLifecycle): void {
+    this.paymentLifecycle = lifecycle;
+  }
 
   private async fetchJson(path: string, body: unknown): Promise<unknown> {
     const response = await fetch(`${this.config.gatewayBaseUrl}${path}`, {
@@ -81,13 +95,50 @@ export class AgentSession {
   ): Promise<PaidFetchResult<T>> {
     try {
       const bearerToken = await this.bearer();
-      return await paidFetch<T>(
+      const result = await paidFetch<T>(
         this.wallet,
         `${this.config.gatewayBaseUrl}${path}`,
-        { ...options, bearerToken },
+        {
+          ...options,
+          bearerToken,
+          paymentLifecycle: this.paymentLifecycle,
+          ...(this.paymentRemainingRaw !== null
+            ? { maxPaymentRaw: this.paymentRemainingRaw.toString() }
+            : {}),
+        },
       );
+      if (result.paidAmountRaw && this.paymentRemainingRaw !== null) {
+        this.paymentRemainingRaw =
+          this.paymentRemainingRaw > BigInt(result.paidAmountRaw)
+            ? this.paymentRemainingRaw - BigInt(result.paidAmountRaw)
+            : 0n;
+      }
+      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (message === "X402_PAYMENT_REPLAY_BLOCKED") {
+        return {
+          status: 409,
+          ok: false,
+          code: "X402_PAYMENT_RECONCILIATION_REQUIRED",
+          message:
+            "A prior payment attempt is unresolved, so another payment was not signed.",
+          retryable: false,
+          paid: false,
+          discounted: false,
+        };
+      }
+      if (message === "budget_exceeded" || message === "action_denied") {
+        return {
+          status: 403,
+          ok: false,
+          code: "X402_PAYMENT_BUDGET_EXCEEDED",
+          message: "The payment is outside the signed authorization policy.",
+          retryable: false,
+          paid: false,
+          discounted: false,
+        };
+      }
       const unreachable =
         message.includes("fetch failed") ||
         message.includes("ECONNREFUSED") ||

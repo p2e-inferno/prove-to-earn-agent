@@ -1,7 +1,7 @@
 import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
 import { ERC20_ABI } from "@/lib/blockchain/shared/abi-definitions";
 import { DG_TOKEN_VENDOR_ABI } from "@/lib/blockchain/shared/vendor-abi";
-import type { AgentWallet } from "./wallet";
+import type { ReadOnlyAgentWallet } from "./actions/types";
 
 export interface WalletBalances {
   /** Raw smallest-unit amounts, keyed by the symbol the task configs use. */
@@ -14,8 +14,16 @@ export interface WalletBalances {
 /** Held back from every ETH-spending decision so the next tx can still be sent. */
 export const GAS_RESERVE_WEI = 5_000_000_000_000n;
 
-export function spendableEth(balance: bigint): bigint {
-  return balance > GAS_RESERVE_WEI ? balance - GAS_RESERVE_WEI : 0n;
+export function spendableEth(
+  balance: bigint,
+  minimumReserveRaw: bigint = GAS_RESERVE_WEI,
+): {
+  balance: bigint;
+  reserved: bigint;
+  spendable: bigint;
+} {
+  const reserved = balance < minimumReserveRaw ? balance : minimumReserveRaw;
+  return { balance, reserved, spendable: balance - reserved };
 }
 
 /**
@@ -25,7 +33,7 @@ export function spendableEth(balance: bigint): bigint {
  * wallet has no UP for, and the only way through is to acquire it first.
  */
 export async function readBalances(
-  wallet: AgentWallet,
+  wallet: ReadOnlyAgentWallet,
 ): Promise<WalletBalances> {
   const erc20 = async (token: `0x${string}`): Promise<bigint> => {
     return (await wallet.publicClient.readContract({
@@ -49,7 +57,7 @@ export async function readBalances(
 }
 
 async function vendorSwapToken(
-  wallet: AgentWallet,
+  wallet: ReadOnlyAgentWallet,
 ): Promise<`0x${string}` | null> {
   const vendor = process.env.NEXT_PUBLIC_DG_VENDOR_ADDRESS;
   if (!vendor || !/^0x[a-fA-F0-9]{40}$/.test(vendor)) return null;

@@ -7,10 +7,14 @@ import {
 import { UNLOCK_FACTORY_ADDRESSES } from "@/constants/unlock_factory_addresses";
 import {
   actionAnalysisSchema,
+  actionEconomics,
   actionResultSchema,
+  actionValue,
   assetAmount,
   confirmedResult,
+  estimateActionGas,
   observedQuote,
+  zeroGasEconomics,
   type ActionDefinition,
   type Blocker,
 } from "./types";
@@ -24,6 +28,38 @@ import { BASE_MAINNET_CHAIN_ID } from "../network";
  * with a lock the rest of the product cannot manage.
  */
 const LOCK_VERSION = 14;
+
+function deployLockCall(parsed: DeployLockInput, owner: `0x${string}`) {
+  const initialize = encodeFunctionData({
+    abi: ADDITIONAL_LOCK_ABI,
+    functionName: "initialize",
+    args: [
+      owner,
+      BigInt(parsed.expirationDuration),
+      "0x0000000000000000000000000000000000000000",
+      0n,
+      BigInt(parsed.maxNumberOfKeys),
+      parsed.lockName,
+    ],
+  });
+  const postDeploy = [
+    encodeFunctionData({
+      abi: ADDITIONAL_LOCK_ABI,
+      functionName: "addLockManager",
+      args: [owner],
+    }),
+    encodeFunctionData({
+      abi: ADDITIONAL_LOCK_ABI,
+      functionName: "renounceLockManager",
+      args: [],
+    }),
+  ];
+  return encodeFunctionData({
+    abi: UNLOCK_FACTORY_ABI,
+    functionName: "createUpgradeableLockAtVersion",
+    args: [initialize, LOCK_VERSION, postDeploy],
+  });
+}
 
 const deployLockInputSchema = z
   .object({
@@ -101,9 +137,23 @@ export const deployLockAction: ActionDefinition<DeployLockInput> = {
       });
     }
 
-    const blockNumber = await ctx.wallet.publicClient
-      .getBlockNumber()
-      .catch(() => null);
+    const factory = UNLOCK_FACTORY_ADDRESSES[parsed.chainId];
+    const [blockNumber, gas] = await Promise.all([
+      ctx.wallet.publicClient.getBlockNumber().catch(() => null),
+      factory
+        ? estimateActionGas(ctx.wallet, {
+            to: factory,
+            data: deployLockCall(parsed, ctx.wallet.address),
+          })
+        : Promise.resolve({
+            estimateRaw: null,
+            priceRaw: null,
+            costRaw: null,
+            costUsd: null,
+            method: "unavailable" as const,
+            scope: "primary_transaction" as const,
+          }),
+    ]);
 
     return actionAnalysisSchema.parse({
       executableNow: blockers.length === 0,
@@ -111,7 +161,8 @@ export const deployLockAction: ActionDefinition<DeployLockInput> = {
       requirements: [],
       effects: [{ kind: "stage", estimatedChangeRaw: "1" }],
       blockers,
-      gasEstimateRaw: null,
+      gasEstimateRaw: gas.estimateRaw,
+      economics: actionEconomics(gas),
       quote: observedQuote("contract", blockNumber),
     });
   },
@@ -127,42 +178,10 @@ export const deployLockAction: ActionDefinition<DeployLockInput> = {
       });
     }
 
-    const initialize = encodeFunctionData({
-      abi: ADDITIONAL_LOCK_ABI,
-      functionName: "initialize",
-      args: [
-        ctx.wallet.address,
-        BigInt(parsed.expirationDuration),
-        "0x0000000000000000000000000000000000000000",
-        0n,
-        BigInt(parsed.maxNumberOfKeys),
-        parsed.lockName,
-      ],
-    });
-
-    // The factory is the initial manager; renouncing leaves the agent wallet as
-    // the only one, so no residual authority survives the deployment.
-    const postDeploy = [
-      encodeFunctionData({
-        abi: ADDITIONAL_LOCK_ABI,
-        functionName: "addLockManager",
-        args: [ctx.wallet.address],
-      }),
-      encodeFunctionData({
-        abi: ADDITIONAL_LOCK_ABI,
-        functionName: "renounceLockManager",
-        args: [],
-      }),
-    ];
-
     await ctx.onTransactionPrepared?.({ approvals: [] });
     const txHash = await ctx.wallet.sendTransaction({
       to: factory,
-      data: encodeFunctionData({
-        abi: UNLOCK_FACTORY_ABI,
-        functionName: "createUpgradeableLockAtVersion",
-        args: [initialize, LOCK_VERSION, postDeploy],
-      }),
+      data: deployLockCall(parsed, ctx.wallet.address),
     });
     await ctx.onTransactionSubmitted?.({ txHash, approvals: [] });
 
@@ -227,6 +246,13 @@ export const gasDropAction: ActionDefinition<
       ],
       blockers: [],
       gasEstimateRaw: "0",
+      economics: actionEconomics(
+        zeroGasEconomics(),
+        actionValue(
+          null,
+          assetAmount("ETH", BigInt(parsed.amountWei), 18, null),
+        ),
+      ),
       quote: observedQuote("task_config", null),
     });
   },
@@ -261,6 +287,7 @@ export const dailyCheckinAction: ActionDefinition<NoInput> = {
       effects: [{ kind: "points", estimatedChangeRaw: "1" }],
       blockers: [],
       gasEstimateRaw: "0",
+      economics: actionEconomics(zeroGasEconomics()),
       quote: observedQuote("none", null),
     });
   },

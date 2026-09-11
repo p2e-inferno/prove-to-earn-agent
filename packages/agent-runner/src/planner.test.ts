@@ -61,7 +61,7 @@ function observation(
     stateVersion: STATE,
     blockNumber: "1",
     assetRequirements: { ETH: "0", USDC: "0", UP: "0", DG: "0" },
-  balances: [],
+    balances: [],
     candidates,
     ownerBlockers: [],
     fatalBlockers: [],
@@ -298,14 +298,15 @@ describe("planAndExecute", () => {
     expect(result.planned).toBe(true);
   });
 
-  it("executes the only candidate when no model is configured", async () => {
+  it("does not let the runtime choose even one candidate without a model", async () => {
     delete process.env.OPENROUTER_API_KEY;
 
     const result = await planAndExecute(deps);
 
     expect(chatCompletion).not.toHaveBeenCalled();
-    expect(executeCandidate).toHaveBeenCalledTimes(1);
-    expect(result.planned).toBe(true);
+    expect(executeCandidate).not.toHaveBeenCalled();
+    expect(result.planned).toBe(false);
+    expect(result.stopCode).toBe("PLANNER_SELECTION_REQUIRED");
   });
 
   it("waits rather than choosing between candidates with no model", async () => {

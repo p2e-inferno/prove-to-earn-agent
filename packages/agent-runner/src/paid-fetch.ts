@@ -11,6 +11,21 @@ export interface PaidFetchOptions {
   body?: unknown;
   idempotencyKey?: string;
   bearerToken?: string;
+  maxPaymentRaw?: string;
+  paymentLifecycle?: X402PaymentLifecycle;
+}
+
+export interface X402PaymentLifecycle {
+  beforePayment(input: {
+    url: string;
+    idempotencyKey: string;
+    phase: "discount" | "full";
+    amountRaw: string;
+  }): Promise<{ reservationId: string }>;
+  paymentResult(input: {
+    reservationId: string;
+    settled: boolean;
+  }): Promise<void>;
 }
 
 export interface PaidFetchResult<T = unknown> {
@@ -23,6 +38,9 @@ export interface PaidFetchResult<T = unknown> {
   intent?: unknown;
   paid: boolean;
   discounted: boolean;
+  paidAmountRaw?: string;
+  /** Full price minus what was paid, when the World discount was honoured. */
+  savedAmountRaw?: string;
 }
 
 /** The server stamps its mode onto the declaration it sends with each 402. */
@@ -76,11 +94,7 @@ function baseHeaders(options: PaidFetchOptions): Record<string, string> {
   if (options.bearerToken) {
     headers.authorization = `Bearer ${options.bearerToken}`;
   }
-  if ((options.method ?? "GET") !== "GET") {
-    // Stable across every retry in this call: the gateway keys the effect on
-    // it, so the paid retry settles the original rather than running twice.
-    headers["idempotency-key"] = options.idempotencyKey ?? randomUUID();
-  }
+  headers["idempotency-key"] = options.idempotencyKey ?? randomUUID();
   return headers;
 }
 
@@ -132,6 +146,66 @@ export function applyDiscount(
   }
 
   return { ...paymentRequired, accepts: discountedAccepts };
+}
+
+function quoteWithinBudget(
+  paymentRequired: PaymentRequired,
+  maxPaymentRaw: string | undefined,
+): boolean {
+  if (maxPaymentRaw === undefined) return true;
+  if (!/^\d+$/.test(maxPaymentRaw)) return false;
+  const amounts = paymentRequired.accepts ?? [];
+  return (
+    amounts.length > 0 &&
+    amounts.every(
+      (requirement) =>
+        /^\d+$/.test(requirement.amount) &&
+        BigInt(requirement.amount) <= BigInt(maxPaymentRaw),
+    )
+  );
+}
+
+function paymentBudgetFailure<T>(): PaidFetchResult<T> {
+  return {
+    status: 403,
+    ok: false,
+    code: "X402_PAYMENT_BUDGET_EXCEEDED",
+    message: "The quoted payment exceeds the remaining authorized budget.",
+    retryable: false,
+    paid: false,
+    discounted: false,
+  };
+}
+
+async function reservePayment(
+  options: PaidFetchOptions,
+  url: string,
+  headers: Record<string, string>,
+  phase: "discount" | "full",
+  amountRaw: string | undefined,
+) {
+  if (!options.paymentLifecycle) return null;
+  if (!amountRaw || !/^\d+$/.test(amountRaw)) {
+    throw new Error("X402_PAYMENT_QUOTE_INVALID");
+  }
+  return options.paymentLifecycle.beforePayment({
+    url,
+    idempotencyKey: headers["idempotency-key"]!,
+    phase,
+    amountRaw,
+  });
+}
+
+async function recordPaymentResult(
+  options: PaidFetchOptions,
+  reservation: { reservationId: string } | null,
+  settled: boolean,
+) {
+  if (!reservation || !options.paymentLifecycle) return;
+  await options.paymentLifecycle.paymentResult({
+    reservationId: reservation.reservationId,
+    settled,
+  });
 }
 
 /**
@@ -211,46 +285,118 @@ export async function paidFetch<T = unknown>(
   if (extension && mode?.type === "discount") {
     const discountedQuote = applyDiscount(paymentRequired, mode.percent);
     if (discountedQuote) {
+      if (!quoteWithinBudget(discountedQuote, options.maxPaymentRaw)) {
+        return paymentBudgetFailure<T>();
+      }
+      let identityHeader: string | null = null;
       try {
-        const identityHeader =
-          await agentkitClientFor(wallet).createHeader(extension);
-        const payload = await http.createPaymentPayload(discountedQuote);
-
-        const discountedResponse = await fetch(url, {
-          ...init,
-          headers: {
-            ...headers,
-            [AGENTKIT]: identityHeader,
-            ...http.encodePaymentSignatureHeader(payload),
-          },
-        });
-
-        // Only a non-402 proves the underpayment was recovered. A 402 means the
-        // discount was refused (allowance spent, agent not in AgentBook), and
-        // the short payment was never settled — so retry at full price.
-        if (discountedResponse.status !== 402) {
-          return toResult<T>(discountedResponse, true, true);
-        }
-        paymentRequired = await readQuote(discountedResponse);
+        identityHeader = await agentkitClientFor(wallet).createHeader(extension);
       } catch {
-        // Fall through and pay in full.
+        identityHeader = null;
+      }
+      if (identityHeader) {
+        const reservation = await reservePayment(
+          options,
+          url,
+          headers,
+          "discount",
+          discountedQuote.accepts?.[0]?.amount,
+        );
+        let payload;
+        try {
+          payload = await http.createPaymentPayload(discountedQuote);
+        } catch {
+          await recordPaymentResult(options, reservation, false);
+          payload = null;
+        }
+        if (payload) {
+          const discountedResponse = await fetch(url, {
+            ...init,
+            headers: {
+              ...headers,
+              [AGENTKIT]: identityHeader,
+              ...http.encodePaymentSignatureHeader(payload),
+            },
+          });
+
+          if (discountedResponse.status !== 402) {
+            await recordPaymentResult(options, reservation, true);
+            const paidAmountRaw = discountedQuote.accepts?.[0]?.amount;
+            return toResult<T>(
+              discountedResponse,
+              true,
+              true,
+              paidAmountRaw,
+              amountDifference(
+                paymentRequired.accepts?.[0]?.amount,
+                paidAmountRaw,
+              ),
+            );
+          }
+          await recordPaymentResult(options, reservation, false);
+          paymentRequired = await readQuote(discountedResponse);
+        }
       }
     }
   }
 
-  const payload = await http.createPaymentPayload(paymentRequired);
+  if (!quoteWithinBudget(paymentRequired, options.maxPaymentRaw)) {
+    return paymentBudgetFailure<T>();
+  }
+  const reservation = await reservePayment(
+    options,
+    url,
+    headers,
+    "full",
+    paymentRequired.accepts?.[0]?.amount,
+  );
+  let payload;
+  try {
+    payload = await http.createPaymentPayload(paymentRequired);
+  } catch (error) {
+    await recordPaymentResult(options, reservation, false);
+    throw error;
+  }
   const paidResponse = await fetch(url, {
     ...init,
     headers: { ...headers, ...http.encodePaymentSignatureHeader(payload) },
   });
-  return toResult<T>(paidResponse, true, false);
+  await recordPaymentResult(options, reservation, paidResponse.status !== 402);
+  return toResult<T>(
+    paidResponse,
+    true,
+    false,
+    paymentRequired.accepts?.[0]?.amount,
+  );
+}
+
+function amountDifference(
+  fullRaw: string | undefined,
+  paidRaw: string | undefined,
+): string | undefined {
+  if (
+    !fullRaw ||
+    !paidRaw ||
+    !/^\d+$/.test(fullRaw) ||
+    !/^\d+$/.test(paidRaw)
+  ) {
+    return undefined;
+  }
+  const saved = BigInt(fullRaw) - BigInt(paidRaw);
+  return saved > 0n ? saved.toString() : undefined;
 }
 
 async function toResult<T>(
   response: Response,
   paid: boolean,
   discounted: boolean,
+  paidAmountRaw?: string,
+  savedAmountRaw?: string,
 ): Promise<PaidFetchResult<T>> {
+  const amounts = {
+    ...(paidAmountRaw ? { paidAmountRaw } : {}),
+    ...(savedAmountRaw ? { savedAmountRaw } : {}),
+  };
   const body = responseEnvelopeSchema.safeParse(
     await response.json().catch(() => null),
   );
@@ -263,6 +409,7 @@ async function toResult<T>(
       retryable: response.status >= 500,
       paid,
       discounted,
+      ...amounts,
     };
   }
   return {
@@ -275,6 +422,7 @@ async function toResult<T>(
     intent: body.data.intent ?? null,
     paid,
     discounted,
+    ...amounts,
   };
 }
 
