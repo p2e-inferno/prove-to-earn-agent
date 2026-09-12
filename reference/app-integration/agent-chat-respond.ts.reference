@@ -1,0 +1,223 @@
+import { chatCompletion } from "@/lib/ai/client";
+import type { AIConversationMessage } from "@/lib/ai/types";
+import { getLogger } from "@/lib/utils/logger";
+import {
+  AGENT_CHAT_MAX_HISTORY_TURNS,
+  type AgentChatAction,
+  type AgentChatTurnResponse,
+} from "../types";
+import {
+  AGENT_CHAT_TOOLS,
+  executeAgentChatTool,
+  type AgentToolContext,
+  type AgentToolOutcome,
+} from "./tools";
+
+const log = getLogger("agent-chat:respond");
+
+export const MAX_ITERATIONS = 20;
+const TIMEOUT_MS = 30_000;
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * A platform kill mid-turn takes the reply and its action records with it, so
+ * the loop must yield a partial answer before the function's own deadline. The
+ * margin left over covers one iteration already in flight when the budget runs
+ * out, since the check cannot preempt a model call or a tool batch.
+ */
+const TURN_BUDGET_MS = 90_000;
+
+// Each of these costs a metered upstream subgraph query, so one turn must not
+// fan out into many. The route already meters turns per owner; this bounds the
+// spend inside a single turn.
+const ONCHAIN_TOOLS = new Set([
+  "get_agent_balances",
+  "get_owner_balances",
+  "query_owner_vendor_activity",
+  "query_owner_swaps",
+]);
+export const MAX_ONCHAIN_CALLS_PER_TURN = 10;
+
+/**
+ * The agent speaks as itself, about its own work, and only from what it read.
+ *
+ * The xDG/DG distinction is stated because this surface reports balances the
+ * owner has earned but not withdrawn, and calling those DG would tell them they
+ * hold a token they do not.
+ */
+const SYSTEM_PROMPT = [
+  "You are a platform-hosted on-chain agent reporting to the human who owns you.",
+  "You stay idle until your owner explicitly authorizes one P2E Inferno daily quest run on Base. You execute it from your dedicated wallet and pay the API per call.",
+  "Speak in the first person, plainly and briefly. You are not a support assistant; you do not answer general questions about the product.",
+  "Answer only from what your tools return. Call a tool before making any claim about your status, your runs, or what went wrong. Never invent a transaction, amount, wallet or outcome.",
+  "Your wallet means your dedicated agent execution wallet. When the owner says my wallet or my balance, they mean their safely linked owner wallets. Use only the wallet roles returned by tools, include a shortened address when multiple wallets share a role, and never infer or change a wallet's role.",
+  "You can read the owner's Base balances and real on-chain history — DG vendor buys, sells, light-ups and stage upgrades, and Uniswap swaps — from verified data. Use those tools when they ask about their wallet or what happened on-chain.",
+  "If a tool reports a failure, say so and give the owner the concrete next step it named.",
+  "Amounts earned in the app are xDG. Only settled on-chain payouts are DG. Never label an earned balance DG.",
+  "You cannot revoke yourself. If the owner wants you stopped, tell them to use the Revoke button on this page; it is permanent and their wallet cannot be re-registered afterwards.",
+].join(" ");
+
+function fallbackReply(
+  reason: "unconfigured" | "error",
+): AgentChatTurnResponse {
+  return {
+    reply:
+      reason === "unconfigured"
+        ? "I can't talk right now — my language model isn't configured on this deployment. My run reports on this page are still up to date."
+        : "I couldn't finish that thought. My run reports on this page are still accurate if you need the details now.",
+    actions: [],
+    source: "deterministic",
+  };
+}
+
+function eligibleRunIds(outcome: AgentToolOutcome): string[] | undefined {
+  try {
+    const parsed = JSON.parse(outcome.content) as {
+      quests?: Array<{ runId?: unknown }>;
+    };
+    const runIds = (parsed.quests ?? [])
+      .map((quest) => quest.runId)
+      .filter(
+        (runId): runId is string =>
+          typeof runId === "string" && UUID.test(runId),
+      );
+    return runIds.length ? [...new Set(runIds)] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * One conversational turn, with tools.
+ *
+ * Never throws: an owner asking their agent a question and getting an
+ * exception is the same silent-failure class this whole surface exists to
+ * remove, so a model outage degrades to a plain answer instead.
+ */
+export async function respondAsAgent(params: {
+  ctx: AgentToolContext;
+  message: string;
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
+}): Promise<AgentChatTurnResponse> {
+  if (!process.env.OPENROUTER_API_KEY) {
+    return fallbackReply("unconfigured");
+  }
+
+  const trimmedHistory = (params.history ?? []).slice(
+    -AGENT_CHAT_MAX_HISTORY_TURNS,
+  );
+
+  const messages: AIConversationMessage[] = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...trimmedHistory.map((turn) => ({
+      role: turn.role,
+      content: turn.content,
+    })),
+    { role: "user", content: params.message },
+  ];
+
+  const actions: AgentChatAction[] = [];
+  let onchainCalls = 0;
+  const deadline = Date.now() + TURN_BUDGET_MS;
+  let budgetSpent = false;
+
+  try {
+    for (let iteration = 0; iteration < MAX_ITERATIONS; iteration += 1) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        budgetSpent = true;
+        break;
+      }
+
+      const result = await chatCompletion({
+        messages,
+        tools: AGENT_CHAT_TOOLS,
+        temperature: 0.2,
+        maxTokens: 1400,
+        signal: AbortSignal.timeout(Math.min(TIMEOUT_MS, remainingMs)),
+      });
+
+      if (!result.success) {
+        log.warn("Agent chat completion failed", {
+          agentId: params.ctx.agentId,
+          code: result.code,
+        });
+        return { ...fallbackReply("error"), actions };
+      }
+
+      if (
+        result.finishReason !== "tool_calls" ||
+        !("toolCalls" in result) ||
+        !("assistantMessage" in result) ||
+        result.toolCalls.length === 0
+      ) {
+        const reply = "content" in result ? result.content.trim() : "";
+        if (!reply) return { ...fallbackReply("error"), actions };
+        return { reply, actions, source: "llm" };
+      }
+
+      messages.push(result.assistantMessage);
+
+      const planned = result.toolCalls.map((call) => {
+        if (!ONCHAIN_TOOLS.has(call.function.name)) {
+          return { call, refused: false };
+        }
+        onchainCalls += 1;
+        return { call, refused: onchainCalls > MAX_ONCHAIN_CALLS_PER_TURN };
+      });
+
+      const budgetSpentOutcome: AgentToolOutcome = {
+        content: JSON.stringify({ ok: false, code: "ONCHAIN_BUDGET_SPENT" }),
+        ok: false,
+        code: "ONCHAIN_BUDGET_SPENT",
+      };
+
+      const outcomes = await Promise.all(
+        planned.map(async ({ call, refused }) => {
+          if (refused) return { call, outcome: budgetSpentOutcome, ms: 0 };
+          const startedAt = Date.now();
+          const outcome = await executeAgentChatTool(
+            params.ctx,
+            call.function.name,
+            call.function.arguments,
+          );
+          return { call, outcome, ms: Date.now() - startedAt };
+        }),
+      );
+
+      for (const { call, outcome, ms } of outcomes) {
+        const runIds =
+          call.function.name === "list_eligible_quests"
+            ? eligibleRunIds(outcome)
+            : undefined;
+        actions.push({
+          tool: call.function.name,
+          ok: outcome.ok,
+          ms,
+          ...(outcome.code ? { code: outcome.code } : {}),
+          ...(outcome.summary ? { summary: outcome.summary } : {}),
+          ...(runIds ? { runIds } : {}),
+        });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: outcome.content,
+        });
+      }
+    }
+
+    // Out of iterations or out of time with no answer: say which, rather than
+    // returning silence or letting the platform drop the turn unrecorded.
+    return {
+      reply: budgetSpent
+        ? "I ran out of time on that one, but what I read is listed below. Ask me again for a narrower piece of it."
+        : "I looked that up but couldn't settle on an answer. Try asking me something more specific about a particular run.",
+      actions,
+      source: "llm",
+    };
+  } catch (error) {
+    log.error("Agent chat turn failed", { agentId: params.ctx.agentId, error });
+    return { ...fallbackReply("error"), actions };
+  }
+}

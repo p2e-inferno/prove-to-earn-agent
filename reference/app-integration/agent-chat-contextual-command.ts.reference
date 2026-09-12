@@ -1,0 +1,41 @@
+import { isContextualQuestCommand } from "./commands";
+import { listExecutableQuests } from "./executable-quests";
+import { latestContextualQuestRun } from "./store";
+
+export type ContextualQuestResolution =
+  | { kind: "not_contextual" }
+  | { kind: "authorized"; runId: string }
+  | { kind: "clarification" };
+
+export async function resolveContextualQuestCommand(input: {
+  message: string;
+  agentId: string;
+  ownerUserId: string;
+  executionWallet: string | null;
+  rewardWallet: string | null;
+}): Promise<ContextualQuestResolution> {
+  if (!isContextualQuestCommand(input.message)) {
+    return { kind: "not_contextual" };
+  }
+  if (!input.executionWallet || !input.rewardWallet) {
+    return { kind: "clarification" };
+  }
+  const priorRunId = await latestContextualQuestRun({
+    agentId: input.agentId,
+    ownerUserId: input.ownerUserId,
+  });
+  if (!priorRunId) return { kind: "clarification" };
+  const eligible = await listExecutableQuests({
+    userId: input.ownerUserId,
+    agentId: input.agentId,
+    executionWallet: input.executionWallet,
+    rewardWallet: input.rewardWallet,
+    actorKind: "agent",
+  });
+  const runIds = eligible
+    .map((run) => (typeof run.id === "string" ? run.id : null))
+    .filter((runId): runId is string => Boolean(runId));
+  return runIds.length === 1 && runIds[0] === priorRunId
+    ? { kind: "authorized", runId: priorRunId }
+    : { kind: "clarification" };
+}

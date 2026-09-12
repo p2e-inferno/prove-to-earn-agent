@@ -1,0 +1,726 @@
+import { type InngestFunction } from "inngest";
+import { isAddress } from "viem";
+import { z } from "zod";
+import {
+  describeQuestAvailability,
+  listExecutableQuests,
+} from "@/lib/agent-chat/server/executable-quests";
+import {
+  assessAdmission,
+  blockedAdmission,
+  type AdmissionAssessment,
+} from "@/packages/agent-runner/src/admission";
+import { appendAgentReply } from "@/lib/agent-chat/server/store";
+import { inngest } from "@/lib/inngest/client";
+import { createAgentAdminClient } from "@/lib/supabase/agent-schema";
+import {
+  createHeadlessTransactionLifecycle,
+  createHeadlessX402Lifecycle,
+} from "@/lib/agent-control/effect-accounting";
+import { loadActiveAuthorization } from "@/packages/agent-gateway/src/auth/headless-authorization";
+import {
+  AgentWorker,
+  createCdpWallet,
+  loadPlatformConfig,
+} from "@/packages/agent-runner/src";
+
+const questListSchema = z.object({
+  runs: z.array(
+    z
+      .object({
+        id: z.string().uuid(),
+        eligibility: z.object({ eligible: z.boolean().optional() }).optional(),
+        template: z.record(z.unknown()).nullable().optional(),
+      })
+      .passthrough(),
+  ),
+});
+type EligibleRun = z.infer<typeof questListSchema>["runs"][number];
+
+async function loadInvocation(agentId: string, commandId: string) {
+  const supabase = createAgentAdminClient();
+  const [
+    { data: agent, error: agentError },
+    { data: command, error: commandError },
+  ] = await Promise.all([
+    supabase
+      .from("registered_agents")
+      .select(
+        "id, owner_user_id, agent_wallet, reward_wallet, provider_account_name, status, execution_mode, max_funding_swaps",
+      )
+      .eq("id", agentId)
+      .maybeSingle(),
+    supabase
+      .from("agent_commands")
+      .select(
+        "id, agent_id, owner_user_id, status, state_version, command_type, requested_run_id, execution_id, pending_decision, controller, max_x402_fee_raw",
+      )
+      .eq("id", commandId)
+      .eq("agent_id", agentId)
+      .maybeSingle(),
+  ]);
+  if (agentError) throw agentError;
+  if (commandError) throw commandError;
+  return { agent, command };
+}
+
+async function updateCommand(
+  commandId: string,
+  agentId: string,
+  ownerUserId: string,
+  expectedStatus: string,
+  expectedVersion: number,
+  patch: Record<string, unknown>,
+): Promise<number | null> {
+  const { data, error } = await createAgentAdminClient()
+    .from("agent_commands")
+    .update({ ...patch, state_version: expectedVersion + 1 })
+    .eq("id", commandId)
+    .eq("agent_id", agentId)
+    .eq("owner_user_id", ownerUserId)
+    .eq("status", expectedStatus)
+    .eq("state_version", expectedVersion)
+    .select("state_version")
+    .maybeSingle();
+  if (error) throw error;
+  return data ? Number(data.state_version) : null;
+}
+
+// A cycle that makes no progress leaves both versions untouched, so the event
+// id must carry this counter or Inngest deduplicates the continuation away and
+// the run is stranded mid-flight. It also bounds an otherwise endless loop.
+const MAX_EXECUTION_CONTINUATIONS = 240;
+
+export function continuationEvent(input: {
+  agentId: string;
+  commandId: string;
+  executionId: string | null;
+  version: number;
+  cycle: number;
+}) {
+  const { agentId, commandId, executionId, version, cycle } = input;
+  return executionId
+    ? {
+        id: `agent-execution-continue-${executionId}-${version}-${cycle}`,
+        name: "agent/execution.continue" as const,
+        data: { agentId, executionId, expectedVersion: version, cycle },
+      }
+    : {
+        id: `agent-execution-retry-${commandId}-${version}-${cycle}`,
+        name: "agent/execution.requested" as const,
+        data: { agentId, commandId, cycle },
+      };
+}
+
+async function requestContinuation(
+  step: {
+    sleep: (...args: any[]) => Promise<unknown>;
+    sendEvent: (...args: any[]) => Promise<unknown>;
+  },
+  agentId: string,
+  commandId: string,
+  executionId: string | null,
+  version: number,
+  cycle: number,
+  delay = "30s",
+) {
+  await step.sleep("wait-before-continuation", delay);
+  await step.sendEvent(
+    "continue-execution",
+    continuationEvent({ agentId, commandId, executionId, version, cycle }),
+  );
+}
+
+async function commandForContinuation(
+  agentId: string,
+  executionId: string,
+  expectedVersion: number,
+): Promise<string | null> {
+  const { data, error } = await createAgentAdminClient()
+    .from("agent_run_executions")
+    .select("command_id, state_version")
+    .eq("id", executionId)
+    .eq("agent_id", agentId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data?.command_id || Number(data.state_version) !== expectedVersion) {
+    return null;
+  }
+  return data.command_id;
+}
+
+export const agentExecutionFunction: InngestFunction<any, any, any, any> =
+  inngest.createFunction(
+    {
+      id: "run-owner-invoked-agent-cycle",
+      retries: 6,
+      onFailure: async ({
+        event,
+      }: {
+        event: { data: { event: { data: Record<string, unknown> } } };
+      }) => {
+        const original = event.data.event.data as {
+          agentId?: string;
+          commandId?: string;
+          executionId?: string;
+        };
+        if (!original.agentId) return;
+        const supabase = createAgentAdminClient();
+        let commandId = original.commandId;
+        if (!commandId && original.executionId) {
+          const { data, error } = await supabase
+            .from("agent_run_executions")
+            .select("command_id")
+            .eq("id", original.executionId)
+            .eq("agent_id", original.agentId)
+            .maybeSingle();
+          if (error) throw error;
+          commandId = data?.command_id ?? undefined;
+        }
+        if (!commandId) return;
+        const { agent, command } = await loadInvocation(
+          original.agentId,
+          commandId,
+        );
+        if (
+          !agent ||
+          !command ||
+          !["queued", "running"].includes(command.status)
+        )
+          return;
+        const version = await updateCommand(
+          command.id,
+          agent.id,
+          agent.owner_user_id,
+          command.status,
+          command.state_version,
+          {
+            status: "decision_required",
+            pending_decision: { kind: "execution_retry" },
+            last_error_code: "EXECUTION_INTERRUPTED",
+          },
+        );
+        if (version !== null)
+          await appendAgentReply({
+            agentId: agent.id,
+            ownerUserId: agent.owner_user_id,
+            content:
+              "The execution service stopped after retries. Your progress is retained. Say “retry the quest” to reconcile and continue.",
+            source: "execution",
+          });
+      },
+      concurrency: [{ limit: 1, key: "event.data.agentId" }],
+      triggers: [
+        { event: "agent/execution.requested" },
+        { event: "agent/execution.continue" },
+      ],
+    },
+    async ({ event, step }: { event: any; step: any }) => {
+      const agentId = String(event.data.agentId ?? "");
+      let commandId = String(event.data.commandId ?? "");
+      const parsedCycle = Number(event.data.cycle ?? 0);
+      const cycleCount =
+        Number.isInteger(parsedCycle) && parsedCycle >= 0 ? parsedCycle : 0;
+      if (!agentId) {
+        throw new Error("Agent execution event is incomplete");
+      }
+      if (!commandId && event.name === "agent/execution.continue") {
+        const executionId = String(event.data.executionId ?? "");
+        const expectedVersion = Number(event.data.expectedVersion);
+        if (!executionId || !Number.isInteger(expectedVersion)) {
+          throw new Error("Agent continuation event is incomplete");
+        }
+        commandId =
+          (await step.run("resolve-continuation-command", () =>
+            commandForContinuation(agentId, executionId, expectedVersion),
+          )) ?? "";
+        if (!commandId) return { outcome: "stale" as const };
+      }
+      if (!commandId) throw new Error("Agent execution event has no commandId");
+
+      const invocation = await step.run("load-agent-command", () =>
+        loadInvocation(agentId, commandId),
+      );
+      const { agent, command } = invocation;
+      if (!agent || !command || command.command_type !== "run_daily_quest") {
+        return { outcome: "ignored" as const };
+      }
+      if (
+        ["completed", "failed", "cancelled", "decision_required"].includes(
+          command.status,
+        )
+      ) {
+        return { outcome: "terminal" as const, status: command.status };
+      }
+      let commandStatus = String(command.status);
+      let commandVersion = Number(command.state_version);
+      if (!Number.isInteger(commandVersion) || commandVersion < 0) {
+        throw new Error("Agent command version is invalid");
+      }
+      const transitionCommand = async (
+        stepId: string,
+        patch: Record<string, unknown>,
+      ) => {
+        const nextVersion = await step.run(stepId, () =>
+          updateCommand(
+            command.id,
+            agent.id,
+            agent.owner_user_id,
+            commandStatus,
+            commandVersion,
+            patch,
+          ),
+        );
+        if (nextVersion === null) return false;
+        commandVersion = Number(nextVersion);
+        if (typeof patch.status === "string") commandStatus = patch.status;
+        return true;
+      };
+      if (
+        agent.status !== "ready" ||
+        agent.execution_mode !== "owner_invoked" ||
+        !agent.provider_account_name ||
+        !agent.agent_wallet ||
+        !isAddress(agent.agent_wallet)
+      ) {
+        if (
+          !(await transitionCommand("fail-command-agent-not-executable", {
+            status: "failed",
+            last_error_code: "AGENT_NOT_EXECUTABLE",
+          }))
+        ) {
+          return { outcome: "stale" as const };
+        }
+        await step.run("reply-agent-not-executable", () =>
+          appendAgentReply({
+            agentId: agent.id,
+            ownerUserId: agent.owner_user_id,
+            content:
+              "I couldn’t start because my execution wallet or owner-invoked mode is not ready.",
+            source: "execution",
+          }),
+        );
+        return { outcome: "failed" as const };
+      }
+
+      const config = loadPlatformConfig({
+        providerAccountName: agent.provider_account_name,
+        maxFundingSwaps: agent.max_funding_swaps,
+      });
+      const wallet = await createCdpWallet(config);
+      if (wallet.address.toLowerCase() !== agent.agent_wallet.toLowerCase()) {
+        throw new Error(
+          "CDP account address does not match the registered agent",
+        );
+      }
+      const authorization =
+        command.controller === "headless"
+          ? await loadActiveAuthorization(agent.id)
+          : null;
+      if (command.controller === "headless" && !authorization) {
+        if (
+          !(await transitionCommand("fail-command-authorization-unavailable", {
+            status: "failed",
+            last_error_code: "AUTHORIZATION_UNAVAILABLE",
+          }))
+        ) return { outcome: "failed" as const };
+        return { outcome: "failed" as const };
+      }
+      if (authorization) {
+        config.maxFundingSwaps = authorization.policy.maxFundingSwapsPerRun;
+        config.slippageBps = Math.min(
+          config.slippageBps ?? authorization.policy.maxSlippageBps,
+          authorization.policy.maxSlippageBps,
+        );
+        config.maxX402PerRunRaw = String(command.max_x402_fee_raw ?? "0");
+        config.minNativeReserveRaw = authorization.policy.minNativeReserveRaw;
+      }
+      await step.run("preflight-owner-invoked-agent", () =>
+        new AgentWorker(wallet, config, {
+          runId: command.requested_run_id ?? undefined,
+          maxCycles: 1,
+          requiredExecutionMode: "owner_invoked",
+        }).preflight(),
+      );
+
+      let runId = command.requested_run_id;
+      if (!runId) {
+        const eligible = (await step.run("discover-eligible-runs", async () => {
+          const runs = await listExecutableQuests({
+            userId: agent.owner_user_id,
+            agentId: agent.id,
+            executionWallet: wallet.address,
+            rewardWallet: agent.reward_wallet,
+            actorKind: "agent",
+          });
+          const parsed = questListSchema.safeParse({ runs });
+          if (!parsed.success) throw new Error("QUEST_DISCOVERY_INVALID");
+          return parsed.data.runs.filter((run) => run.eligibility?.eligible);
+        })) as EligibleRun[];
+
+        if (eligible.length === 0) {
+          if (
+            !(await transitionCommand("complete-command-no-eligible-quest", {
+              status: "completed",
+              last_error_code: null,
+            }))
+          ) {
+            return { outcome: "stale" as const };
+          }
+          await step.run("reply-no-eligible-quest", () =>
+            appendAgentReply({
+              agentId: agent.id,
+              ownerUserId: agent.owner_user_id,
+              content:
+                "There is no eligible, supported daily quest within my current execution permissions. No quest was started.",
+              source: "execution",
+            }),
+          );
+          return { outcome: "no_work" as const };
+        }
+
+        if (eligible.length > 1) {
+          const choices = eligible.map((run) => ({
+            runId: run.id,
+            label:
+              typeof run.template?.title === "string"
+                ? run.template.title
+                : `Quest ${run.id.slice(0, 8)}`,
+          }));
+          if (
+            !(await transitionCommand("request-quest-selection", {
+              status: "decision_required",
+              pending_decision: {
+                kind: "quest_selection",
+                runIds: choices.map((choice) => choice.runId),
+                choices,
+              },
+            }))
+          ) {
+            return { outcome: "stale" as const };
+          }
+          const selectionVersion = commandVersion;
+          await step.run("reply-quest-selection", () =>
+            appendAgentReply({
+              agentId: agent.id,
+              ownerUserId: agent.owner_user_id,
+              content:
+                "More than one daily quest is eligible. Choose the one I should run.",
+              source: "execution",
+              actions: choices.map((choice) => ({
+                tool: "select_daily_quest",
+                ok: true,
+                summary: choice.label,
+                commandId: command.id,
+                commandVersion: selectionVersion,
+                prompt: choice.runId,
+              })),
+            }),
+          );
+          return { outcome: "decision_required" as const };
+        }
+        runId = eligible[0]!.id;
+        if (
+          !(await transitionCommand("select-only-eligible-quest", {
+            requested_run_id: runId,
+            status: "running",
+            pending_decision: null,
+            last_error_code: null,
+          }))
+        ) {
+          return { outcome: "stale" as const };
+        }
+      }
+
+      if (runId && !command.execution_id) {
+        const admission = (await step.run("check-quest-admission", async () => {
+          const existing = await createAgentAdminClient()
+            .from("agent_run_executions")
+            .select("id")
+            .eq("agent_id", agent.id)
+            .eq("owner_user_id", agent.owner_user_id)
+            .eq("daily_quest_run_id", runId!)
+            .maybeSingle();
+          if (existing.error) throw existing.error;
+          if (existing.data) return null;
+          const principal = {
+            userId: agent.owner_user_id,
+            agentId: agent.id,
+            executionWallet: wallet.address,
+            rewardWallet: agent.reward_wallet,
+            actorKind: "agent" as const,
+          };
+          const availability = await describeQuestAvailability(principal);
+          const selected = availability.executable.find(
+            (candidate) => candidate.id === runId,
+          );
+          if (!selected) {
+            const reason =
+              availability.blocked.find(
+                (candidate) => candidate.runId === runId,
+              ) ?? availability.blocked[0];
+            return blockedAdmission(wallet.address, {
+              code: reason?.code ?? "QUEST_UNAVAILABLE",
+              message:
+                reason?.message ??
+                "This quest is no longer available to this agent.",
+              ...(reason?.taskId ? { taskId: reason.taskId } : {}),
+            });
+          }
+          return assessAdmission(wallet, config, selected);
+        })) as AdmissionAssessment | null;
+        const priorDecision = command.pending_decision as {
+          kind?: unknown;
+          runId?: unknown;
+          assessment?: { stateVersion?: unknown };
+        } | null;
+        const ownerProceeded =
+          priorDecision?.kind === "admission_proceed" &&
+          priorDecision.runId === runId &&
+          priorDecision.assessment?.stateVersion === admission?.stateVersion;
+        if (
+          admission &&
+          !admission.admissible &&
+          !(admission.overridable && ownerProceeded)
+        ) {
+          if (
+            !(await transitionCommand("pause-admission", {
+              status: "decision_required",
+              pending_decision: {
+                kind: "admission",
+                runId,
+                assessment: admission,
+                options: admission.overridable
+                  ? ["proceed", "cancel"]
+                  : ["retry", "cancel"],
+              },
+              last_error_code:
+                admission.blockers[0]?.code ?? "ADMISSION_REQUIRED",
+            }))
+          )
+            return { outcome: "stale" as const };
+          await step.run("reply-admission", () =>
+            appendAgentReply({
+              agentId: agent.id,
+              ownerUserId: agent.owner_user_id,
+              content: `${admission.blockers.map((blocker) => blocker.message).join(" ")} ${
+                admission.overridable
+                  ? "You can fund the wallet first, or explicitly proceed with the current funding."
+                  : "Resolve the blocker, then check again."
+              }`,
+              source: "execution",
+              actions: (admission.overridable
+                ? [
+                    { resolution: "proceed", label: "Proceed anyway" },
+                    { resolution: "cancel", label: "Cancel run" },
+                  ]
+                : [
+                    { resolution: "retry", label: "Check again" },
+                    { resolution: "cancel", label: "Cancel run" },
+                  ]
+              ).map((choice) => ({
+                tool: "resolve_admission",
+                ok: true,
+                summary: choice.label,
+                commandId: command.id,
+                commandVersion,
+                prompt: choice.resolution,
+              })),
+            }),
+          );
+          return { outcome: "decision_required" as const };
+        }
+      }
+
+      if (runId && commandStatus !== "running") {
+        if (!["queued", "decision_required"].includes(commandStatus)) {
+          return { outcome: "stale" as const };
+        }
+        if (
+          !(await transitionCommand("start-selected-quest", {
+            status: "running",
+            pending_decision: null,
+            last_error_code: null,
+          }))
+        ) {
+          return { outcome: "stale" as const };
+        }
+      }
+
+      const cycle = await step.run("run-one-bounded-cycle", async () => {
+        const worker = new AgentWorker(wallet, config, {
+          runId: runId!,
+          maxCycles: 1,
+          commandId: command.id,
+          decisionAuthority:
+            command.controller === "headless"
+              ? "delegated_client"
+              : "platform_chat",
+          ...(authorization
+            ? {
+                transactionLifecycle: ({
+                  candidate,
+                  transactionIndex,
+                  executionId,
+                  delegatedSelection,
+                }) =>
+                  createHeadlessTransactionLifecycle({
+                    agentId: agent.id,
+                    authorizationId: authorization.id,
+                    commandId: command.id,
+                    executionId,
+                    frameId: delegatedSelection.frameId,
+                    fingerprint: delegatedSelection.fingerprint,
+                    candidate,
+                    transactionIndex,
+                  }),
+                paymentLifecycle: (executionId) =>
+                  createHeadlessX402Lifecycle({
+                    agentId: agent.id,
+                    authorizationId: authorization.id,
+                    commandId: command.id,
+                    executionId,
+                  }),
+              }
+            : {}),
+        });
+        return worker.runOnce(runId!);
+      });
+
+      const execution = await step.run("load-cycle-execution", async () => {
+        const { data, error } = await createAgentAdminClient()
+          .from("agent_run_executions")
+          .select("id, status, state_version, pending_decision")
+          .eq("agent_id", agent.id)
+          .eq("owner_user_id", agent.owner_user_id)
+          .eq("daily_quest_run_id", runId!)
+          .maybeSingle();
+        if (error) throw error;
+        return data;
+      });
+      if (execution && !command.execution_id) {
+        const linked = await step.run("link-command-execution", async () => {
+          const { data, error } = await createAgentAdminClient().rpc(
+            "link_agent_command_execution",
+            {
+              p_agent_id: agent.id,
+              p_owner_user_id: agent.owner_user_id,
+              p_command_id: command.id,
+              p_execution_id: execution.id,
+              p_expected_status: commandStatus,
+              p_expected_version: commandVersion,
+            },
+          );
+          if (error) throw error;
+          return data;
+        });
+        if (!linked) return { outcome: "stale" as const };
+        commandVersion += 1;
+        commandStatus = "running";
+      }
+
+      if (cycle.outcome === "ran" || cycle.outcome === "terminal") {
+        const succeeded =
+          cycle.outcome === "ran" || execution?.status === "completed";
+        if (
+          !(await transitionCommand("finish-terminal-command", {
+            status: succeeded ? "completed" : "failed",
+            last_error_code: succeeded ? null : "EXECUTION_TERMINAL",
+          }))
+        ) {
+          return { outcome: "stale" as const };
+        }
+        await step.run("reply-terminal-command", () =>
+          appendAgentReply({
+            agentId: agent.id,
+            ownerUserId: agent.owner_user_id,
+            executionId: execution?.id ?? null,
+            content: succeeded
+              ? "The authorized quest run is complete. The execution report has the transactions, payments, and rewards."
+              : "The authorized quest run ended without completing. The execution report has the failure details.",
+            source: "execution",
+          }),
+        );
+        return { outcome: succeeded ? "completed" : "failed" };
+      }
+
+      if (cycle.outcome === "decision_required") {
+        if (
+          !(await transitionCommand("pause-command-for-owner", {
+            status: "decision_required",
+            pending_decision: execution?.pending_decision ?? null,
+            last_error_code:
+              cycle.report?.blockingCode ?? "OWNER_ACTION_REQUIRED",
+          }))
+        ) {
+          return { outcome: "stale" as const };
+        }
+        await step.run("reply-owner-decision-required", () =>
+          appendAgentReply({
+            agentId: agent.id,
+            ownerUserId: agent.owner_user_id,
+            executionId: execution?.id ?? null,
+            content:
+              cycle.detail ??
+              "I need an owner decision before this quest run can continue.",
+            source: "execution",
+          }),
+        );
+        return { outcome: "decision_required" as const };
+      }
+
+      if (cycle.outcome === "forbidden" || cycle.failureClass === "fatal") {
+        if (
+          !(await transitionCommand("fail-command-after-cycle", {
+            status: "failed",
+            last_error_code: cycle.report?.blockingCode ?? "EXECUTION_FAILED",
+          }))
+        ) {
+          return { outcome: "stale" as const };
+        }
+        await step.run("reply-command-failed", () =>
+          appendAgentReply({
+            agentId: agent.id,
+            ownerUserId: agent.owner_user_id,
+            executionId: execution?.id ?? null,
+            content: cycle.detail ?? "The authorized quest run failed.",
+            source: "execution",
+          }),
+        );
+        return { outcome: "failed" as const };
+      }
+
+      if (cycleCount >= MAX_EXECUTION_CONTINUATIONS) {
+        if (
+          !(await transitionCommand("fail-command-cycle-limit", {
+            status: "failed",
+            last_error_code: "EXECUTION_CYCLE_LIMIT",
+          }))
+        ) {
+          return { outcome: "stale" as const };
+        }
+        await step.run("reply-cycle-limit", () =>
+          appendAgentReply({
+            agentId: agent.id,
+            ownerUserId: agent.owner_user_id,
+            executionId: execution?.id ?? null,
+            content:
+              "I stopped this run after too many cycles without finishing. Nothing further was attempted — instruct me again when you want me to retry.",
+            source: "execution",
+          }),
+        );
+        return { outcome: "failed" as const };
+      }
+
+      await requestContinuation(
+        step,
+        agent.id,
+        command.id,
+        execution?.id ?? null,
+        execution?.state_version ?? commandVersion,
+        cycleCount + 1,
+        cycle.outcome === "continue" ? "1s" : "30s",
+      );
+      return { outcome: "continued" as const };
+    },
+  );

@@ -1,0 +1,34 @@
+export type QuestCommandIntent = "explicit" | "ambiguous" | "none";
+
+const QUEST_TERMS =
+  /\b(?:daily\s+quest|today(?:'s|s)?\s+quest|quest\s+today)\b/i;
+const RUN_COMMAND =
+  /^(?:please\s+)?(?:run|start|do|execute|begin)\s+(?:(?:the|my)\s+)?(?:daily\s+quest|today's\s+quest|quest\s+today)(?:\s+now)?[.!]?$/i;
+const RETRY_COMMAND =
+  /^(?:please\s+)?(?:i(?:'ve| have)\s+funded\s+(?:it|the\s+wallet)[,.]?\s*)?(?:retry|continue|resume)(?:\s+(?:the|today's|my))?\s+(?:quest|run)(?:\s+now)?[.!]?$/i;
+
+function normalize(message: string): string {
+  return message.replace(/[‘’ʼʹ′]/g, "'").trim();
+}
+
+export function classifyQuestCommand(message: string): QuestCommandIntent {
+  const normalized = normalize(message);
+  if (!QUEST_TERMS.test(normalized)) return "none";
+  return RUN_COMMAND.test(normalized) ? "explicit" : "ambiguous";
+}
+
+export function isContextualQuestCommand(message: string): boolean {
+  return /^(?:please\s+)?(?:run|start|do)\s+it(?:\s+now)?[.!]?$/i.test(
+    normalize(message),
+  );
+}
+
+export function isExplicitQuestRetry(message: string): boolean {
+  return RETRY_COMMAND.test(normalize(message));
+}
+
+export function isExplicitQuestCancel(message: string): boolean {
+  return /^(?:please\s+)?cancel(?:\s+(?:the|today's|my))?\s+(?:quest|run)[.!]?$/i.test(
+    normalize(message),
+  );
+}

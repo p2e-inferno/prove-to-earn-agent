@@ -1,0 +1,293 @@
+import { canonicalize } from "json-canonicalize";
+import { createHash } from "crypto";
+import type { ActionCandidate } from "@/packages/agent-runner/src/actions/types";
+import type {
+  PreparedAgentTransaction,
+  TransactionLifecycle,
+} from "@/packages/agent-runner/src/wallet";
+import type { X402PaymentLifecycle } from "@/packages/agent-runner/src/paid-fetch";
+import { createHeadlessAgentAdminClient } from "@/lib/supabase/headless-agent-schema";
+
+function firstAddress(value: unknown): string | null {
+  if (typeof value === "string" && /^0x[a-fA-F0-9]{40}$/.test(value)) {
+    return value.toLowerCase();
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const address = firstAddress(item);
+      if (address) return address;
+    }
+  } else if (value && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      const address = firstAddress(item);
+      if (address) return address;
+    }
+  }
+  return null;
+}
+
+export function candidateFingerprint(candidate: ActionCandidate): string {
+  return `0x${createHash("sha256")
+    .update(canonicalize(candidate))
+    .digest("hex")}`;
+}
+
+export async function reserveHeadlessCandidateEffect(input: {
+  agentId: string;
+  authorizationId: string;
+  commandId: string;
+  executionId: string;
+  frameId: string;
+  fingerprint: string;
+  candidate: ActionCandidate;
+}) {
+  if (candidateFingerprint(input.candidate) !== input.fingerprint) {
+    throw new Error("CANDIDATE_FINGERPRINT_MISMATCH");
+  }
+  const principal = input.candidate.analysis.economics.value.principal;
+  const gas = input.candidate.analysis.economics.gas.costRaw ?? "0";
+  const lines = [
+    ...(principal
+      ? [
+          {
+            category: "asset",
+            asset: principal.asset,
+            tokenAddress: principal.tokenAddress,
+            reservedRaw: principal.raw,
+          },
+        ]
+      : []),
+    {
+      category: "gas",
+      asset: "ETH",
+      tokenAddress: null,
+      reservedRaw: gas,
+    },
+  ];
+  const db = createHeadlessAgentAdminClient();
+  const { data, error } = await db.rpc("reserve_agent_effect", {
+    p_agent_id: input.agentId,
+    p_authorization_id: input.authorizationId,
+    p_command_id: input.commandId,
+    p_execution_id: input.executionId,
+    p_idempotency_key: `${input.frameId}:${input.candidate.candidateId}`,
+    p_frame_id: input.frameId,
+    p_candidate_id: input.candidate.candidateId,
+    p_candidate_fingerprint: input.fingerprint,
+    p_action_id: input.candidate.actionName,
+    p_action_version: input.candidate.actionVersion,
+    p_target: firstAddress(input.candidate.input),
+    p_calldata_hash: null,
+    p_usage_lines: lines,
+  });
+  if (error) throw error;
+  const result = data as Record<string, unknown>;
+  if (result.outcome !== "reserved") {
+    throw new Error(String(result.outcome ?? "EFFECT_RESERVATION_FAILED"));
+  }
+  return { effectId: String(result.effect_id), replayed: result.replayed === true };
+}
+
+function approvalAction(data: string): "approval.erc20" | "approval.permit2" | null {
+  if (data.startsWith("0x095ea7b3")) return "approval.erc20";
+  if (data.startsWith("0x87517c45")) return "approval.permit2";
+  return null;
+}
+
+export function createHeadlessTransactionLifecycle(input: {
+  agentId: string;
+  authorizationId: string;
+  commandId: string;
+  executionId: string;
+  frameId: string;
+  fingerprint: string;
+  candidate: ActionCandidate;
+  transactionIndex: number;
+}): TransactionLifecycle {
+  let effectId: string | null = null;
+  let gasAsset = "ETH";
+  return {
+    async beforeSign(prepared: PreparedAgentTransaction) {
+      if (candidateFingerprint(input.candidate) !== input.fingerprint) {
+        throw new Error("CANDIDATE_FINGERPRINT_MISMATCH");
+      }
+      const approval = approvalAction(prepared.data);
+      const principal = input.candidate.analysis.economics.value.principal;
+      const gasMaximum = BigInt(prepared.gas) * BigInt(prepared.maxFeePerGas);
+      const usageLines = [
+        ...(!approval && principal
+          ? [
+              {
+                category: "asset",
+                asset: principal.asset,
+                tokenAddress: principal.tokenAddress,
+                reservedRaw: principal.raw,
+              },
+            ]
+          : []),
+        {
+          category: "gas",
+          asset: gasAsset,
+          tokenAddress: null,
+          reservedRaw: gasMaximum.toString(),
+        },
+      ];
+      const db = createHeadlessAgentAdminClient();
+      const { data, error } = await db.rpc("reserve_agent_effect", {
+        p_agent_id: input.agentId,
+        p_authorization_id: input.authorizationId,
+        p_command_id: input.commandId,
+        p_execution_id: input.executionId,
+        p_idempotency_key: `${input.frameId}:${input.candidate.candidateId}:${input.transactionIndex}`,
+        p_frame_id: input.frameId,
+        p_candidate_id: input.candidate.candidateId,
+        p_candidate_fingerprint: input.fingerprint,
+        p_action_id: approval ?? input.candidate.actionName,
+        p_action_version: approval ? 1 : input.candidate.actionVersion,
+        p_target: prepared.to.toLowerCase(),
+        p_calldata_hash: `0x${createHash("sha256")
+          .update(Buffer.from(prepared.data.slice(2), "hex"))
+          .digest("hex")}`,
+        p_usage_lines: usageLines,
+      });
+      if (error) throw error;
+      const result = data as Record<string, unknown>;
+      if (result.outcome !== "reserved") {
+        throw new Error(String(result.outcome ?? "EFFECT_RESERVATION_FAILED"));
+      }
+      effectId = String(result.effect_id);
+      if (result.replayed === true && result.state !== "reserved") {
+        const existing = await db
+          .from("agent_effect_reservations")
+          .select(
+            "provider_idempotency_key, signed_transaction, transaction_hash, state",
+          )
+          .eq("id", effectId)
+          .maybeSingle();
+        if (existing.error) throw existing.error;
+        if (
+          !existing.data?.provider_idempotency_key ||
+          !existing.data.transaction_hash
+        ) {
+          throw new Error("EFFECT_REPLAY_UNAVAILABLE");
+        }
+        return {
+          providerIdempotencyKey: existing.data.provider_idempotency_key,
+          transactionHash: existing.data.transaction_hash as `0x${string}`,
+          ...(existing.data.signed_transaction
+            ? {
+                signedTransaction: existing.data
+                  .signed_transaction as `0x${string}`,
+              }
+            : {}),
+        };
+      }
+      return { providerIdempotencyKey: effectId };
+    },
+    async persistSigned(signed) {
+      if (!effectId) throw new Error("EFFECT_RESERVATION_MISSING");
+      const db = createHeadlessAgentAdminClient();
+      const { data, error } = await db.rpc("prepare_agent_effect", {
+        p_effect_id: effectId,
+        p_provider_idempotency_key: signed.providerIdempotencyKey,
+        p_signed_transaction: signed.signedTransaction,
+        p_transaction_hash: signed.transactionHash,
+        p_transaction_nonce: signed.prepared.nonce,
+      });
+      if (error) throw error;
+      if (data !== true) throw new Error("EFFECT_PREPARE_CONFLICT");
+    },
+    async submitted(transactionHash) {
+      if (!effectId) throw new Error("EFFECT_RESERVATION_MISSING");
+      const db = createHeadlessAgentAdminClient();
+      const { data, error } = await db.rpc("mark_agent_effect_submitted", {
+        p_effect_id: effectId,
+        p_transaction_hash: transactionHash,
+      });
+      if (error) throw error;
+      if (data !== true) throw new Error("EFFECT_SUBMIT_CONFLICT");
+    },
+    async reconciled(receipt) {
+      if (!effectId) throw new Error("EFFECT_RESERVATION_MISSING");
+      const db = createHeadlessAgentAdminClient();
+      const { data, error } = await db.rpc("reconcile_agent_effect", {
+        p_effect_id: effectId,
+        p_outcome: receipt.status,
+        p_actual_lines: receipt.gasCostRaw
+          ? [
+              {
+                category: "gas",
+                asset: gasAsset,
+                tokenAddress: null,
+                actualRaw: receipt.gasCostRaw,
+              },
+            ]
+          : [],
+      });
+      if (error) throw error;
+      if (data !== true) throw new Error("EFFECT_RECONCILE_CONFLICT");
+    },
+  };
+}
+
+export function createHeadlessX402Lifecycle(input: {
+  agentId: string;
+  authorizationId: string;
+  commandId: string;
+  executionId: string;
+}): X402PaymentLifecycle {
+  return {
+    async beforePayment(payment) {
+      const route = new URL(payment.url).pathname;
+      const identity = canonicalize({
+        route,
+        requestId: payment.idempotencyKey,
+        phase: payment.phase,
+        amountRaw: payment.amountRaw,
+      });
+      const digest = createHash("sha256").update(identity).digest("hex");
+      const db = createHeadlessAgentAdminClient();
+      const { data, error } = await db.rpc("reserve_agent_effect", {
+        p_agent_id: input.agentId,
+        p_authorization_id: input.authorizationId,
+        p_command_id: input.commandId,
+        p_execution_id: input.executionId,
+        p_idempotency_key: `x402:${payment.idempotencyKey}:${payment.phase}`,
+        p_frame_id: input.commandId,
+        p_candidate_id: `cand_${digest.slice(0, 32)}`,
+        p_candidate_fingerprint: `0x${digest}`,
+        p_action_id: "x402.payment",
+        p_action_version: 1,
+        p_target: null,
+        p_calldata_hash: `0x${createHash("sha256").update(route).digest("hex")}`,
+        p_usage_lines: [
+          {
+            category: "x402",
+            asset: "USDC",
+            tokenAddress: null,
+            reservedRaw: payment.amountRaw,
+          },
+        ],
+      });
+      if (error) throw error;
+      const result = data as Record<string, unknown>;
+      if (result.outcome !== "reserved") {
+        throw new Error(String(result.outcome ?? "X402_RESERVATION_FAILED"));
+      }
+      if (result.replayed === true) {
+        throw new Error("X402_PAYMENT_REPLAY_BLOCKED");
+      }
+      return { reservationId: String(result.effect_id) };
+    },
+    async paymentResult(result) {
+      const db = createHeadlessAgentAdminClient();
+      const { data, error } = await db.rpc("settle_agent_nonchain_effect", {
+        p_effect_id: result.reservationId,
+        p_settled: result.settled,
+        p_outcome: result.settled ? "settled" : "not_settled",
+      });
+      if (error) throw error;
+      if (data !== true) throw new Error("X402_RECONCILE_CONFLICT");
+    },
+  };
+}

@@ -1,0 +1,153 @@
+import { createHash } from "crypto";
+import { NextResponse, type NextRequest } from "next/server";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { resolveHeadlessActor } from "@/packages/agent-gateway/src/auth/headless-session";
+import {
+  headlessAgentIssuer,
+  headlessAgentMcpEnabled,
+} from "@/packages/agent-gateway/src/env";
+import { createHeadlessMcpServer } from "@/packages/agent-gateway/src/mcp/server";
+import { rateLimiter } from "@/lib/utils/agent-rate-limiter";
+import { inspectMcpRequest } from "@/packages/agent-gateway/src/payments/mcp-tool-peek";
+import { invokeCanonicalEconomicRoute } from "@/packages/agent-gateway/src/payments/x402";
+
+type McpEconomicRoute = {
+  routeId: string;
+  params: Record<string, string>;
+};
+
+function mcpEconomicRoute(inspection: {
+  toolName: string | null;
+  arguments: unknown;
+}): McpEconomicRoute | null {
+  if (inspection.toolName === "quest_list") {
+    return { routeId: "quests.list", params: {} };
+  }
+  if (
+    inspection.toolName === "quest_assess" &&
+    inspection.arguments &&
+    typeof inspection.arguments === "object" &&
+    typeof (inspection.arguments as { runId?: unknown }).runId === "string"
+  ) {
+    return {
+      routeId: "quests.assessment",
+      params: {
+        runId: (inspection.arguments as { runId: string }).runId,
+      },
+    };
+  }
+  return null;
+}
+
+async function isMcpToolFailure(response: NextResponse): Promise<boolean> {
+  if (response.status !== 200) return true;
+  const payload = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as {
+    error?: unknown;
+    result?: { isError?: unknown };
+  } | null;
+  return !payload || Boolean(payload.error) || payload.result?.isError === true;
+}
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+export async function POST(req: NextRequest) {
+  const inspection = await inspectMcpRequest(req);
+  if (inspection.isBatch) {
+    return NextResponse.json(
+      {
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: -32600,
+          message: "JSON-RPC batch requests are not supported.",
+        },
+      },
+      { status: 400, headers: { "Cache-Control": "no-store, private" } },
+    );
+  }
+  if (!headlessAgentMcpEnabled()) {
+    return NextResponse.json({ error: "NOT_FOUND" }, { status: 404 });
+  }
+  const actor = await resolveHeadlessActor(req);
+  if (!actor) {
+    return NextResponse.json(
+      { error: "invalid_token" },
+      {
+        status: 401,
+        headers: {
+          "Cache-Control": "no-store",
+          "WWW-Authenticate": `Bearer resource_metadata="${headlessAgentIssuer()}/.well-known/oauth-protected-resource"`,
+        },
+      },
+    );
+  }
+  const clientHash = createHash("sha256")
+    .update(actor.claims.clientId)
+    .digest("hex");
+  const limit = await rateLimiter.check(
+    `headless-mcp:${clientHash}`,
+    120,
+    60_000,
+  );
+  if (limit.unavailable) {
+    return NextResponse.json(
+      { error: "temporarily_unavailable" },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  if (!limit.success) {
+    return NextResponse.json(
+      { error: "rate_limited" },
+      { status: 429, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  const runTransport = async (): Promise<NextResponse> => {
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    });
+    const server = createHeadlessMcpServer({
+      authorization: actor.authorization,
+      agent: actor.agent,
+      clientId: actor.claims.clientId,
+      scopes: actor.claims.scopes,
+    });
+    await server.connect(transport);
+    try {
+      const response = await transport.handleRequest(req);
+      response.headers.set("Cache-Control", "no-store, private");
+      return response as unknown as NextResponse;
+    } finally {
+      await transport.close();
+      await server.close();
+    }
+  };
+
+  const economicRoute = mcpEconomicRoute(inspection);
+  if (!economicRoute) return runTransport();
+
+  let failedToolResponse: NextResponse | null = null;
+  const paidResponse = await invokeCanonicalEconomicRoute(req, {
+    ...economicRoute,
+    handler: async () => {
+      const response = await runTransport();
+      if (await isMcpToolFailure(response)) {
+        failedToolResponse = response;
+        return new NextResponse(null, { status: 422 });
+      }
+      return response;
+    },
+  });
+  return failedToolResponse ?? paidResponse;
+}
+
+export function GET() {
+  return new NextResponse(null, { status: 405, headers: { Allow: "POST" } });
+}
+
+export const DELETE = GET;
