@@ -153,6 +153,7 @@ describe("classifyFailure", () => {
     ["UNSUPPORTED_ROUTE", "fatal"],
     ["INVALID_TASK_CONFIG", "fatal"],
     ["DAILY_QUEST_PATH_ALREADY_SELECTED", "fatal"],
+    ["X402_PAYMENT_VALIDATION_FAILED", "fatal"],
   ])("routes %s to %s", (code, expected) => {
     expect(classifyFailure(code)).toBe(expected);
   });

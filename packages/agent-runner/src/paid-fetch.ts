@@ -335,7 +335,11 @@ export async function paidFetch<T = unknown>(
             );
           }
           await recordPaymentResult(options, reservation, false);
-          paymentRequired = await readQuote(discountedResponse);
+          const fullPriceChallenge = await fetch(url, init);
+          if (fullPriceChallenge.status !== 402) {
+            return toResult<T>(fullPriceChallenge, false, false);
+          }
+          paymentRequired = await readQuote(fullPriceChallenge);
         }
       }
     }
@@ -416,9 +420,19 @@ async function toResult<T>(
   return {
     status: response.status,
     ok: body.data.ok === true,
-    code: body.data.code,
-    message: body.data.message,
-    retryable: body.data.retryable === true,
+    code:
+      body.data.code ??
+      (paid && response.status === 402
+        ? "X402_PAYMENT_VALIDATION_FAILED"
+        : undefined),
+    message:
+      body.data.message ??
+      (paid && response.status === 402
+        ? "The x402 validator rejected the signed payment."
+        : undefined),
+    retryable:
+      body.data.retryable === true ||
+      (paid && response.status === 402 ? false : undefined),
     data: (body.data.data ?? undefined) as T | undefined,
     intent: body.data.intent ?? null,
     paid,

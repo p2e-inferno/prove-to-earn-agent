@@ -163,14 +163,15 @@ describe("paidFetch discount negotiation", () => {
       .mockResolvedValueOnce(
         jsonResponse(402, quote({ mode: { type: "discount", percent: 50 } })),
       )
+      .mockResolvedValueOnce(jsonResponse(402, { ok: false }))
       .mockResolvedValueOnce(jsonResponse(402, quote()))
       .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
     global.fetch = fetchMock as never;
 
     const result = await paidFetch(wallet, "https://gateway.test/x");
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(fetchMock.mock.calls[2]![1].headers["PAYMENT-SIGNATURE"]).toBe(
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls[3]![1].headers["PAYMENT-SIGNATURE"]).toBe(
       `signed:${FULL_PRICE}`,
     );
     // The short payment was never settled, so claiming a discount would be a lie.
@@ -194,6 +195,22 @@ describe("paidFetch discount negotiation", () => {
       `signed:${FULL_PRICE}`,
     );
     expect(result.discounted).toBe(false);
+  });
+
+  it("normalizes a final paid 402 so the worker does not retry an unknown error", async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(402, quote()))
+      .mockResolvedValueOnce(jsonResponse(402, { ok: false })) as never;
+
+    await expect(
+      paidFetch(wallet, "https://gateway.test/x"),
+    ).resolves.toMatchObject({
+      status: 402,
+      ok: false,
+      code: "X402_PAYMENT_VALIDATION_FAILED",
+      retryable: false,
+    });
   });
 
   it("takes free access from the identity header without paying", async () => {
