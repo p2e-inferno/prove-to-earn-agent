@@ -204,11 +204,14 @@ export async function planAndExecute(
   if (deps.delegatedSelection) {
     const observation = await observe();
     latest = observation;
-    if (observation.stateVersion !== deps.delegatedSelection.expectedStateVersion) {
+    if (
+      observation.stateVersion !== deps.delegatedSelection.expectedStateVersion
+    ) {
       return { ...result(), stopCode: "DECISION_STALE" };
     }
     const selected = observation.candidates.find(
-      (candidate) => candidate.candidateId === deps.delegatedSelection!.candidateId,
+      (candidate) =>
+        candidate.candidateId === deps.delegatedSelection!.candidateId,
     );
     if (!selected) return { ...result(), stopCode: "CANDIDATE_INVALID" };
     if (selected.expiresAt && Date.parse(selected.expiresAt) <= Date.now()) {

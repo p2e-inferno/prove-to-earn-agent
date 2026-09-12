@@ -34,7 +34,10 @@ jest.mock("../db/agents", () => ({
   findOwnedAgent: jest.fn(),
   loadPermissions: jest.fn(),
   hasCapability: (
-    permissions: Array<{ capability: string; dailyQuestTemplateId: string | null }>,
+    permissions: Array<{
+      capability: string;
+      dailyQuestTemplateId: string | null;
+    }>,
     capability: string,
     templateId?: string | null,
   ) =>
@@ -42,7 +45,8 @@ jest.mock("../db/agents", () => ({
       (permission) =>
         permission.capability === capability &&
         (permission.dailyQuestTemplateId === null ||
-          (Boolean(templateId) && permission.dailyQuestTemplateId === templateId)),
+          (Boolean(templateId) &&
+            permission.dailyQuestTemplateId === templateId)),
     ),
 }));
 
@@ -133,13 +137,15 @@ beforeEach(() => {
     rewardWallet: REWARD_WALLET,
     status: "ready",
   });
-  mockLoadPermissions.mockResolvedValue([
-    "quests.read",
-    "quests.start",
-    "tasks.complete",
-    "tasks.claim",
-    "quests.complete",
-  ].map((capability) => ({ capability, dailyQuestTemplateId: null })));
+  mockLoadPermissions.mockResolvedValue(
+    [
+      "quests.read",
+      "quests.start",
+      "tasks.complete",
+      "tasks.claim",
+      "quests.complete",
+    ].map((capability) => ({ capability, dailyQuestTemplateId: null })),
+  );
 });
 
 describe("live daily-quest permission bounds", () => {
@@ -151,9 +157,10 @@ describe("live daily-quest permission bounds", () => {
     "quests.complete",
   ];
   const allFor = (templateId: string | null): AgentPermission[] =>
-    capabilities.map(
-      (capability) => ({ capability, dailyQuestTemplateId: templateId }),
-    );
+    capabilities.map((capability) => ({
+      capability,
+      dailyQuestTemplateId: templateId,
+    }));
 
   it("requires every live capability and lets a headless policy only narrow it", () => {
     const templateA = TEMPLATE_ID;

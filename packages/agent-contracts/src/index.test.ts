@@ -1,7 +1,4 @@
-import {
-  authorizationPolicyV1Schema,
-  decisionSelectionV1Schema,
-} from ".";
+import { authorizationPolicyV1Schema, decisionSelectionV1Schema } from ".";
 
 describe("agent contracts", () => {
   it("rejects floating-point enforcement values", () => {

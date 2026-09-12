@@ -290,7 +290,8 @@ export async function paidFetch<T = unknown>(
       }
       let identityHeader: string | null = null;
       try {
-        identityHeader = await agentkitClientFor(wallet).createHeader(extension);
+        identityHeader =
+          await agentkitClientFor(wallet).createHeader(extension);
       } catch {
         identityHeader = null;
       }

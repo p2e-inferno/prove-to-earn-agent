@@ -43,7 +43,10 @@ export function createHeadlessOwnerRoute(
     if (guard.response || !guard.context) {
       return noStore(
         guard.response ??
-          NextResponse.json({ error: "AUTHENTICATION_REQUIRED" }, { status: 401 }),
+          NextResponse.json(
+            { error: "AUTHENTICATION_REQUIRED" },
+            { status: 401 },
+          ),
       );
     }
     const params = routeContext?.params ? await routeContext.params : {};

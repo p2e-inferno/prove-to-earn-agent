@@ -361,7 +361,8 @@ export class AgentWorker {
 
     // Consumed here, not carried forward: an answer applies to the attempt it
     // unblocked, and leaving it in the checkpoint would replay it every cycle.
-    const { ownerResolution, delegatedSelection, ...carried } = lease.checkpoint;
+    const { ownerResolution, delegatedSelection, ...carried } =
+      lease.checkpoint;
     if (ownerResolution === "retry" && Array.isArray(carried.actionTimeline)) {
       carried.actionTimeline = (
         carried.actionTimeline as ActionTimelineEntry[]
@@ -604,17 +605,17 @@ export class AgentWorker {
                     report.decisionFrameDraft.ownerPolicyBlockers,
                 }
               : {
-                // The resolver matches on this id, so a decision written
-                // without one could never be answered by its owner.
-                id: randomUUID(),
-                code: report.blockingCode ?? "OWNER_ACTION_REQUIRED",
-                question:
-                  report.ownerQuestions?.[0]?.question ??
-                  report.blockingReason ??
-                  "This run needs you before the agent can continue.",
-                options: rewardDecision
-                  ? ["retry", "finalize"]
-                  : ["retry", "cancel"],
+                  // The resolver matches on this id, so a decision written
+                  // without one could never be answered by its owner.
+                  id: randomUUID(),
+                  code: report.blockingCode ?? "OWNER_ACTION_REQUIRED",
+                  question:
+                    report.ownerQuestions?.[0]?.question ??
+                    report.blockingReason ??
+                    "This run needs you before the agent can continue.",
+                  options: rewardDecision
+                    ? ["retry", "finalize"]
+                    : ["retry", "cancel"],
                 }
             : null,
         decisionDeadline: frameExpiresAt ?? decisionDeadline,

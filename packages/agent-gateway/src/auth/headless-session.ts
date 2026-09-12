@@ -28,7 +28,8 @@ let keysPromise: Promise<SigningKeys> | null = null;
 
 function parseJwk(value: string, label: string): JWK {
   const parsed = JSON.parse(value) as JWK;
-  if (!parsed || typeof parsed !== "object") throw new Error(`${label} is invalid`);
+  if (!parsed || typeof parsed !== "object")
+    throw new Error(`${label} is invalid`);
   return parsed;
 }
 
@@ -134,7 +135,8 @@ export async function verifyHeadlessAccessToken(
       typeof credentialId !== "string" ||
       typeof clientId !== "string" ||
       typeof scope !== "string"
-    ) return null;
+    )
+      return null;
     return {
       agentId,
       authorizationId,
@@ -176,6 +178,7 @@ export async function resolveHeadlessActor(req: NextRequest) {
     !agent ||
     agent.status !== "ready" ||
     !agent.agentWallet
-  ) return null;
+  )
+    return null;
   return { claims, authorization, agent };
 }

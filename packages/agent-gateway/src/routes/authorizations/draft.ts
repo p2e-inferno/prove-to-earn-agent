@@ -12,22 +12,20 @@ const draftSchema = z
   })
   .strict();
 
-export const POST = createHeadlessOwnerRoute(
-  async (req, params, context) => {
-    if (!params.agentId) {
-      return headlessOwnerJson({ error: "INVALID_REQUEST" }, 400);
-    }
-    const parsed = draftSchema.safeParse(await req.json().catch(() => null));
-    if (!parsed.success) {
-      return headlessOwnerJson({ error: "INVALID_POLICY" }, 400);
-    }
-    const draft = await createAuthorizationDraft({
-      agentId: params.agentId,
-      ownerUserId: context.ownerUserId,
-      ownerWallet: context.ownerWallet,
-      policy: parsed.data.policy,
-      expiresAt: parsed.data.expiresAt,
-    });
-    return headlessOwnerJson({ authorization: draft }, 201);
-  },
-);
+export const POST = createHeadlessOwnerRoute(async (req, params, context) => {
+  if (!params.agentId) {
+    return headlessOwnerJson({ error: "INVALID_REQUEST" }, 400);
+  }
+  const parsed = draftSchema.safeParse(await req.json().catch(() => null));
+  if (!parsed.success) {
+    return headlessOwnerJson({ error: "INVALID_POLICY" }, 400);
+  }
+  const draft = await createAuthorizationDraft({
+    agentId: params.agentId,
+    ownerUserId: context.ownerUserId,
+    ownerWallet: context.ownerWallet,
+    policy: parsed.data.policy,
+    expiresAt: parsed.data.expiresAt,
+  });
+  return headlessOwnerJson({ authorization: draft }, 201);
+});

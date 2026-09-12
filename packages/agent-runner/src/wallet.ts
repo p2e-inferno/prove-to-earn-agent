@@ -43,11 +43,14 @@ export interface AgentWallet {
   provider: "cdp" | "local";
   x402Signer: X402Signer;
   publicClient: PublicClient;
-  sendTransaction(tx: {
-    to: Address;
-    data: `0x${string}`;
-    value?: bigint;
-  }, lifecycle?: TransactionLifecycle): Promise<`0x${string}`>;
+  sendTransaction(
+    tx: {
+      to: Address;
+      data: `0x${string}`;
+      value?: bigint;
+    },
+    lifecycle?: TransactionLifecycle,
+  ): Promise<`0x${string}`>;
   signMessage(message: string): Promise<`0x${string}`>;
   signTypedData(args: {
     domain: Record<string, unknown>;
@@ -55,9 +58,7 @@ export interface AgentWallet {
     primaryType: string;
     message: Record<string, unknown>;
   }): Promise<`0x${string}`>;
-  waitForReceipt(
-    hash: `0x${string}`,
-  ): Promise<{
+  waitForReceipt(hash: `0x${string}`): Promise<{
     status: "success" | "reverted";
     gasCostRaw?: string;
     blockNumber?: string;
@@ -95,9 +96,21 @@ export interface TransactionLifecycle {
   }): Promise<void>;
 }
 
-function publicPreparation(request: Record<string, unknown>): PreparedAgentTransaction {
-  const required = ["to", "data", "nonce", "gas", "maxFeePerGas", "maxPriorityFeePerGas", "chainId"];
-  if (required.some((key) => request[key] === undefined || request[key] === null)) {
+function publicPreparation(
+  request: Record<string, unknown>,
+): PreparedAgentTransaction {
+  const required = [
+    "to",
+    "data",
+    "nonce",
+    "gas",
+    "maxFeePerGas",
+    "maxPriorityFeePerGas",
+    "chainId",
+  ];
+  if (
+    required.some((key) => request[key] === undefined || request[key] === null)
+  ) {
     throw new Error("Prepared transaction is missing an EIP-1559 field");
   }
   return {
@@ -175,7 +188,9 @@ export function createLocalWallet(config: RunnerConfig): AgentWallet {
         value: tx.value ?? 0n,
         type: "eip1559",
       });
-      const prepared = publicPreparation(request as unknown as Record<string, unknown>);
+      const prepared = publicPreparation(
+        request as unknown as Record<string, unknown>,
+      );
       const directive = lifecycle
         ? await lifecycle.beforeSign(prepared)
         : { providerIdempotencyKey: randomUUID() };
@@ -199,7 +214,11 @@ export function createLocalWallet(config: RunnerConfig): AgentWallet {
         signedTransaction,
         transactionHash,
       });
-      const hash = await broadcastSigned(publicClient, signedTransaction, transactionHash);
+      const hash = await broadcastSigned(
+        publicClient,
+        signedTransaction,
+        transactionHash,
+      );
       await lifecycle?.submitted(hash);
       return hash;
     },
@@ -278,7 +297,9 @@ export async function createCdpWallet(
         value: tx.value ?? 0n,
         type: "eip1559",
       });
-      const prepared = publicPreparation(request as unknown as Record<string, unknown>);
+      const prepared = publicPreparation(
+        request as unknown as Record<string, unknown>,
+      );
       const directive = lifecycle
         ? await lifecycle.beforeSign(prepared)
         : { providerIdempotencyKey: randomUUID() };
@@ -311,7 +332,11 @@ export async function createCdpWallet(
         signedTransaction,
         transactionHash,
       });
-      const hash = await broadcastSigned(publicClient, signedTransaction, transactionHash);
+      const hash = await broadcastSigned(
+        publicClient,
+        signedTransaction,
+        transactionHash,
+      );
       await lifecycle?.submitted(hash);
       return hash;
     },

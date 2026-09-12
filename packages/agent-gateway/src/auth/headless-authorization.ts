@@ -114,7 +114,9 @@ export function headlessPolicyAllowsTemplate(
   policy: AuthorizationPolicyV1,
   templateId: string,
 ): boolean {
-  return policy.templateIds.length === 0 || policy.templateIds.includes(templateId);
+  return (
+    policy.templateIds.length === 0 || policy.templateIds.includes(templateId)
+  );
 }
 
 const DEFAULT_POLICY_LIMITS = {

@@ -84,12 +84,13 @@ async function requireLiveCommandPermission(
 
 async function allowedLiveTemplateIds(ctx: HeadlessControlContext) {
   const permissions = await loadPermissions(ctx.agent.id);
-  const everyCapabilityIsUnscoped = DAILY_QUEST_CAPABILITIES.every((capability) =>
-    permissions.some(
-      (permission) =>
-        permission.capability === capability &&
-        permission.dailyQuestTemplateId === null,
-    ),
+  const everyCapabilityIsUnscoped = DAILY_QUEST_CAPABILITIES.every(
+    (capability) =>
+      permissions.some(
+        (permission) =>
+          permission.capability === capability &&
+          permission.dailyQuestTemplateId === null,
+      ),
   );
   if (everyCapabilityIsUnscoped) {
     return ctx.authorization.policy.templateIds.length > 0
@@ -100,7 +101,9 @@ async function allowedLiveTemplateIds(ctx: HeadlessControlContext) {
   return [
     ...new Set(
       permissions.flatMap((permission) =>
-        permission.dailyQuestTemplateId ? [permission.dailyQuestTemplateId] : [],
+        permission.dailyQuestTemplateId
+          ? [permission.dailyQuestTemplateId]
+          : [],
       ),
     ),
   ].filter(
@@ -145,7 +148,9 @@ export async function assessHeadlessQuest(
   await requireLiveRunPermission(ctx, runId);
   const actor = principal(ctx);
   const availability = await describeQuestAvailability(actor);
-  const run = availability.executable.find((candidate) => candidate.id === runId);
+  const run = availability.executable.find(
+    (candidate) => candidate.id === runId,
+  );
   if (!run) {
     const reason =
       availability.blocked.find((candidate) => candidate.runId === runId) ??
@@ -159,7 +164,8 @@ export async function assessHeadlessQuest(
     };
   }
   const config = loadPlatformConfig({
-    providerAccountName: ctx.agent.providerAccountName ?? `read-${ctx.agent.id}`,
+    providerAccountName:
+      ctx.agent.providerAccountName ?? `read-${ctx.agent.id}`,
     maxFundingSwaps: ctx.authorization.policy.maxFundingSwapsPerRun,
   });
   return {
@@ -181,7 +187,9 @@ export async function startHeadlessRun(
 ) {
   await requirePaidAccess(ctx);
   await requireLiveRunPermission(ctx, input.runId);
-  if (BigInt(input.maxFeeRaw) > BigInt(ctx.authorization.policy.maxX402PerRunRaw)) {
+  if (
+    BigInt(input.maxFeeRaw) > BigInt(ctx.authorization.policy.maxX402PerRunRaw)
+  ) {
     throw new Error("POLICY_DENIED");
   }
   const db = createHeadlessAgentAdminClient();
@@ -451,7 +459,9 @@ export async function cancelHeadlessRun(
 
 export async function getHeadlessUsage(ctx: HeadlessControlContext) {
   const db = createHeadlessAgentAdminClient();
-  const windowStartedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const windowStartedAt = new Date(
+    Date.now() - 24 * 60 * 60 * 1000,
+  ).toISOString();
   const { data: lines, error } = await db
     .from("agent_effect_usage_lines")
     .select("*")
@@ -472,7 +482,10 @@ export async function getHeadlessUsage(ctx: HeadlessControlContext) {
   const effects = new Map(
     (effectsResult.data ?? []).map((effect) => [effect.id, effect]),
   );
-  const totals = new Map<string, { category: string; asset: string; reservedRaw: bigint; actualRaw: bigint }>();
+  const totals = new Map<
+    string,
+    { category: string; asset: string; reservedRaw: bigint; actualRaw: bigint }
+  >();
   for (const line of lines ?? []) {
     const effect = effects.get(line.effect_id);
     if (!effect || effect.state === "released") continue;
@@ -508,8 +521,7 @@ export async function getHeadlessUsage(ctx: HeadlessControlContext) {
           asset: line.asset,
           tokenAddress: line.token_address,
           reservedRaw: String(line.reserved_raw),
-          actualRaw:
-            line.actual_raw === null ? null : String(line.actual_raw),
+          actualRaw: line.actual_raw === null ? null : String(line.actual_raw),
           state: effect.state,
           createdAt: line.created_at,
         },

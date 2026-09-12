@@ -143,7 +143,11 @@ function firstAddress(value: unknown): `0x${string}` | null {
 function decisionDraft(
   observation: Pick<
     CandidateObservation,
-    "stateVersion" | "balances" | "ownerBlockers" | "fatalBlockers" | "candidates"
+    | "stateVersion"
+    | "balances"
+    | "ownerBlockers"
+    | "fatalBlockers"
+    | "candidates"
   >,
 ): DecisionFrameDraft {
   const now = Date.now();
@@ -159,10 +163,12 @@ function decisionDraft(
     })),
     candidates: observation.candidates.map((candidate) => {
       const principal = candidate.analysis.economics.value.principal;
-      const marketExpiry = candidate.actionName === "p2e_uniswap_swap" ? 60_000 : 300_000;
+      const marketExpiry =
+        candidate.actionName === "p2e_uniswap_swap" ? 60_000 : 300_000;
       const defaultExpiry = new Date(now + marketExpiry).toISOString();
       const expiresAt =
-        candidate.expiresAt && Date.parse(candidate.expiresAt) < Date.parse(defaultExpiry)
+        candidate.expiresAt &&
+        Date.parse(candidate.expiresAt) < Date.parse(defaultExpiry)
           ? candidate.expiresAt
           : defaultExpiry;
       const fingerprint = `0x${createHash("sha256")
@@ -260,7 +266,9 @@ export async function runDailyQuest(
   config: RunnerConfig,
   options: RunOptions = {},
 ): Promise<RunReport> {
-  const restoredApiSpendRaw = BigInt(options.restoredSpend?.apiSpent.raw ?? "0");
+  const restoredApiSpendRaw = BigInt(
+    options.restoredSpend?.apiSpent.raw ?? "0",
+  );
   const configuredApiCap = config.maxX402PerRunRaw
     ? BigInt(config.maxX402PerRunRaw)
     : null;
@@ -270,10 +278,9 @@ export async function runDailyQuest(
       ...config,
       ...(configuredApiCap !== null
         ? {
-            maxX402PerRunRaw: (
-              configuredApiCap > restoredApiSpendRaw
-                ? configuredApiCap - restoredApiSpendRaw
-                : 0n
+            maxX402PerRunRaw: (configuredApiCap > restoredApiSpendRaw
+              ? configuredApiCap - restoredApiSpendRaw
+              : 0n
             ).toString(),
           }
         : {}),

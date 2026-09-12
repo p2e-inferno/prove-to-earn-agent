@@ -3,10 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { rateLimiter } from "@/lib/utils/agent-rate-limiter";
 import { verifyHeadlessCredential } from "../../auth/headless-authorization";
 import { issueHeadlessAccessToken } from "../../auth/headless-session";
-import {
-  headlessAgentAuthEnabled,
-  headlessAgentResource,
-} from "../../env";
+import { headlessAgentAuthEnabled, headlessAgentResource } from "../../env";
 
 function oauthError(error: string, description: string, status: number) {
   const response = NextResponse.json(
@@ -18,7 +15,9 @@ function oauthError(error: string, description: string, status: number) {
   return response;
 }
 
-function readBasic(req: NextRequest): { clientId: string; clientSecret: string } | null {
+function readBasic(
+  req: NextRequest,
+): { clientId: string; clientSecret: string } | null {
   const header = req.headers.get("authorization");
   const match = header ? /^Basic ([A-Za-z0-9+/=]+)$/.exec(header) : null;
   if (!match) return null;
@@ -36,13 +35,24 @@ function readBasic(req: NextRequest): { clientId: string; clientSecret: string }
 }
 
 export async function POST(req: NextRequest) {
-  if (!headlessAgentAuthEnabled()) return oauthError("invalid_request", "Not found", 404);
+  if (!headlessAgentAuthEnabled())
+    return oauthError("invalid_request", "Not found", 404);
   const basic = readBasic(req);
-  if (!basic || basic.clientSecret.length > 512 || basic.clientId.length > 200) {
+  if (
+    !basic ||
+    basic.clientSecret.length > 512 ||
+    basic.clientId.length > 200
+  ) {
     return oauthError("invalid_client", "Client authentication failed", 401);
   }
-  const identityHash = createHash("sha256").update(basic.clientId).digest("hex");
-  const limit = await rateLimiter.check(`headless-token:${identityHash}`, 20, 60_000);
+  const identityHash = createHash("sha256")
+    .update(basic.clientId)
+    .digest("hex");
+  const limit = await rateLimiter.check(
+    `headless-token:${identityHash}`,
+    20,
+    60_000,
+  );
   if (limit.unavailable) {
     return oauthError("temporarily_unavailable", "Try again shortly", 503);
   }
@@ -60,10 +70,18 @@ export async function POST(req: NextRequest) {
   }
   const form = new URLSearchParams(raw);
   if (form.get("grant_type") !== "client_credentials") {
-    return oauthError("unsupported_grant_type", "Only client_credentials is supported", 400);
+    return oauthError(
+      "unsupported_grant_type",
+      "Only client_credentials is supported",
+      400,
+    );
   }
   if (form.get("resource") !== headlessAgentResource()) {
-    return oauthError("invalid_target", "The canonical resource is required", 400);
+    return oauthError(
+      "invalid_target",
+      "The canonical resource is required",
+      400,
+    );
   }
 
   const verified = await verifyHeadlessCredential(
@@ -73,12 +91,14 @@ export async function POST(req: NextRequest) {
   if (!verified) {
     return oauthError("invalid_client", "Client authentication failed", 401);
   }
-  const requestedScopes = (form.get("scope") ?? "")
-    .split(" ")
-    .filter(Boolean);
+  const requestedScopes = (form.get("scope") ?? "").split(" ").filter(Boolean);
   const allowedScopes = verified.credential.scopes;
   if (requestedScopes.some((scope) => !allowedScopes.includes(scope))) {
-    return oauthError("invalid_scope", "A requested scope is not authorized", 400);
+    return oauthError(
+      "invalid_scope",
+      "A requested scope is not authorized",
+      400,
+    );
   }
   const scopes = requestedScopes.length ? requestedScopes : allowedScopes;
   const access = await issueHeadlessAccessToken({

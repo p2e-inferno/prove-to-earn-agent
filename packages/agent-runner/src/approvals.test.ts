@@ -27,11 +27,13 @@ interface WalletFixture {
  * way the real `checkErc20ApprovalForPermit2`/`checkPermit2Allowance`
  * helpers do — no mocking of those helpers themselves.
  */
-function makeWallet(state: {
-  erc20Allowance?: bigint;
-  permit2Allowance?: { amount: bigint; expiration: number; nonce: number };
-  spenderAllowance?: bigint;
-} = {}): WalletFixture {
+function makeWallet(
+  state: {
+    erc20Allowance?: bigint;
+    permit2Allowance?: { amount: bigint; expiration: number; nonce: number };
+    spenderAllowance?: bigint;
+  } = {},
+): WalletFixture {
   const sendTransaction = jest.fn(async () => "0xhash" as `0x${string}`);
   const waitForReceipt = jest.fn(async () => ({ status: "success" as const }));
   const readContract = jest.fn(
@@ -80,14 +82,12 @@ function approveCall(sendTransaction: jest.Mock, index: number) {
 describe("ensureSwapApprovals", () => {
   it("grants a reusable maximum allowance on first encounter with a spender", async () => {
     const { wallet, sendTransaction } = makeWallet();
-    const steps = await ensureSwapApprovals(
-      wallet,
-      TOKEN_IN,
-      1_000n,
-      false,
-    );
+    const steps = await ensureSwapApprovals(wallet, TOKEN_IN, 1_000n, false);
 
-    expect(steps.map((s) => s.step)).toEqual(["erc20-permit2", "permit2-router"]);
+    expect(steps.map((s) => s.step)).toEqual([
+      "erc20-permit2",
+      "permit2-router",
+    ]);
     // approve(permit2, MAX_UINT256)
     expect(approveCall(sendTransaction, 0).data).toContain(
       MAX_UINT256.toString(16),

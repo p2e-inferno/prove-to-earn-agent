@@ -278,7 +278,8 @@ export async function createPlatformAgent(input: {
     p_label: input.displayName,
     p_capabilities: input.capabilities,
     p_template_scope: input.templateScope,
-    p_template_ids: input.templateScope === "selected" ? input.templateIds : null,
+    p_template_ids:
+      input.templateScope === "selected" ? input.templateIds : null,
     p_max_funding_swaps: input.maxFundingSwaps,
     p_owner_limit: input.ownerLimit,
   });

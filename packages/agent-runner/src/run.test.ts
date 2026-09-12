@@ -229,20 +229,22 @@ function modelPicksEveryCandidate() {
 
 /** Offer one candidate per unsettled task, the way the real observer does. */
 function offerCandidatesFor(taskIds: string[]) {
-  observeCandidates.mockImplementation(async (args: { settledTaskIds?: Set<string> }) => {
-    const candidates = taskIds
-      .filter((id) => !args.settledTaskIds?.has(id))
-      .map(candidateFor);
-    modelCandidateIds = candidates.map((candidate) => candidate.candidateId);
-    return {
-      stateVersion: "s1",
-      blockNumber: "1",
-      balances: [],
-      candidates,
-      ownerBlockers: [],
-      fatalBlockers: [],
-    };
-  });
+  observeCandidates.mockImplementation(
+    async (args: { settledTaskIds?: Set<string> }) => {
+      const candidates = taskIds
+        .filter((id) => !args.settledTaskIds?.has(id))
+        .map(candidateFor);
+      modelCandidateIds = candidates.map((candidate) => candidate.candidateId);
+      return {
+        stateVersion: "s1",
+        blockNumber: "1",
+        balances: [],
+        candidates,
+        ownerBlockers: [],
+        fatalBlockers: [],
+      };
+    },
+  );
 }
 
 beforeEach(() => {

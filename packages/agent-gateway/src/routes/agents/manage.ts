@@ -32,7 +32,11 @@ const capabilities = [
   "quests.complete",
 ] as const satisfies readonly AgentCapability[];
 
-const templateScopeSchema = z.enum(["all", "selected", "none"]) satisfies z.ZodType<TemplateScope>;
+const templateScopeSchema = z.enum([
+  "all",
+  "selected",
+  "none",
+]) satisfies z.ZodType<TemplateScope>;
 
 const templateScopeFields = {
   // ALL/SELECTED/NONE is an explicit choice, never inferred from whether
@@ -54,7 +58,10 @@ const createSchema = z
   .refine(
     (value) =>
       value.templateScope !== "selected" || value.templateIds.length > 0,
-    { message: "Select at least one template, or choose All or None", path: ["templateIds"] },
+    {
+      message: "Select at least one template, or choose All or None",
+      path: ["templateIds"],
+    },
   );
 
 const permissionsUpdateSchema = z
@@ -66,7 +73,10 @@ const permissionsUpdateSchema = z
   .refine(
     (value) =>
       value.templateScope !== "selected" || value.templateIds.length > 0,
-    { message: "Select at least one template, or choose All or None", path: ["templateIds"] },
+    {
+      message: "Select at least one template, or choose All or None",
+      path: ["templateIds"],
+    },
   );
 
 const updateSchema = z
