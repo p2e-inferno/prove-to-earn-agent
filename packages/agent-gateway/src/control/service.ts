@@ -11,8 +11,17 @@ import {
   blockedAdmission,
 } from "@/packages/agent-runner/src/admission";
 import { loadPlatformConfig } from "@/packages/agent-runner/src/config";
-import type { HeadlessAuthorization } from "../auth/headless-authorization";
-import type { RegisteredAgent } from "../db/agents";
+import {
+  DAILY_QUEST_CAPABILITIES,
+  hasLiveDailyQuestPermission,
+  headlessPolicyAllowsTemplate,
+  type HeadlessAuthorization,
+} from "../auth/headless-authorization";
+import {
+  loadPermissions,
+  templateIdForRun,
+  type RegisteredAgent,
+} from "../db/agents";
 
 export type HeadlessControlContext = {
   authorization: HeadlessAuthorization;
@@ -38,6 +47,69 @@ async function requirePaidAccess(ctx: HeadlessControlContext) {
   }
 }
 
+async function requireLiveRunPermission(
+  ctx: HeadlessControlContext,
+  runId: string,
+) {
+  const [templateId, permissions] = await Promise.all([
+    templateIdForRun(runId),
+    loadPermissions(ctx.agent.id),
+  ]);
+  if (
+    !templateId ||
+    !headlessPolicyAllowsTemplate(ctx.authorization.policy, templateId) ||
+    !hasLiveDailyQuestPermission(permissions, templateId)
+  ) {
+    throw new Error("POLICY_DENIED");
+  }
+}
+
+async function requireLiveCommandPermission(
+  ctx: HeadlessControlContext,
+  commandId: string,
+) {
+  const db = createHeadlessAgentAdminClient();
+  const { data, error } = await db
+    .from("agent_commands")
+    .select("requested_run_id")
+    .eq("id", commandId)
+    .eq("agent_id", ctx.agent.id)
+    .eq("owner_user_id", ctx.agent.ownerUserId)
+    .eq("controller", "headless")
+    .maybeSingle();
+  if (error) throw error;
+  if (!data?.requested_run_id) throw new Error("RUN_NOT_FOUND");
+  await requireLiveRunPermission(ctx, data.requested_run_id);
+}
+
+async function allowedLiveTemplateIds(ctx: HeadlessControlContext) {
+  const permissions = await loadPermissions(ctx.agent.id);
+  const everyCapabilityIsUnscoped = DAILY_QUEST_CAPABILITIES.every((capability) =>
+    permissions.some(
+      (permission) =>
+        permission.capability === capability &&
+        permission.dailyQuestTemplateId === null,
+    ),
+  );
+  if (everyCapabilityIsUnscoped) {
+    return ctx.authorization.policy.templateIds.length > 0
+      ? ctx.authorization.policy.templateIds
+      : null;
+  }
+
+  return [
+    ...new Set(
+      permissions.flatMap((permission) =>
+        permission.dailyQuestTemplateId ? [permission.dailyQuestTemplateId] : [],
+      ),
+    ),
+  ].filter(
+    (templateId) =>
+      headlessPolicyAllowsTemplate(ctx.authorization.policy, templateId) &&
+      hasLiveDailyQuestPermission(permissions, templateId),
+  );
+}
+
 export async function getHeadlessConfig(ctx: HeadlessControlContext) {
   return {
     agent: {
@@ -56,9 +128,11 @@ export async function getHeadlessConfig(ctx: HeadlessControlContext) {
 }
 
 export async function listHeadlessQuests(ctx: HeadlessControlContext) {
+  const templateIds = await allowedLiveTemplateIds(ctx);
+  if (templateIds?.length === 0) return { runs: [] };
   const result = await listDailyQuests(
     principal(ctx),
-    ctx.authorization.policy.templateIds,
+    templateIds ?? undefined,
   );
   if (result.status >= 400) throw new Error("QUEST_LIST_UNAVAILABLE");
   return result.body;
@@ -68,6 +142,7 @@ export async function assessHeadlessQuest(
   ctx: HeadlessControlContext,
   runId: string,
 ) {
+  await requireLiveRunPermission(ctx, runId);
   const actor = principal(ctx);
   const availability = await describeQuestAvailability(actor);
   const run = availability.executable.find((candidate) => candidate.id === runId);
@@ -105,6 +180,7 @@ export async function startHeadlessRun(
   input: { runId: string; requestId: string; maxFeeRaw: string },
 ) {
   await requirePaidAccess(ctx);
+  await requireLiveRunPermission(ctx, input.runId);
   if (BigInt(input.maxFeeRaw) > BigInt(ctx.authorization.policy.maxX402PerRunRaw)) {
     throw new Error("POLICY_DENIED");
   }
@@ -194,6 +270,9 @@ export async function getHeadlessRun(
       expectedExecutionVersion: executionDecision.expectedExecutionVersion,
       candidates: executionDecision.candidates,
       expiresAt: executionDecision.expiresAt,
+      balances: executionDecision.balances ?? undefined,
+      platformBlockers: executionDecision.platformBlockers ?? undefined,
+      ownerPolicyBlockers: executionDecision.ownerPolicyBlockers ?? undefined,
     });
     decision = parsed.success
       ? { kind: "action_selection", ...parsed.data }
@@ -251,6 +330,7 @@ export async function chooseHeadlessCandidate(
   },
 ) {
   await requirePaidAccess(ctx);
+  await requireLiveCommandPermission(ctx, input.commandId);
   const db = createHeadlessAgentAdminClient();
   const { data, error } = await db.rpc("resolve_headless_agent_candidate", {
     p_agent_id: ctx.agent.id,
@@ -284,6 +364,9 @@ export async function resolveHeadlessAdmission(
   },
 ) {
   await requirePaidAccess(ctx);
+  if (input.resolution !== "cancel") {
+    await requireLiveCommandPermission(ctx, input.commandId);
+  }
   const db = createHeadlessAgentAdminClient();
   const { data, error } = await db.rpc(
     "resolve_headless_agent_admission_decision",
@@ -319,6 +402,9 @@ export async function resolveHeadlessRunDecision(
   },
 ) {
   await requirePaidAccess(ctx);
+  if (input.resolution !== "cancel") {
+    await requireLiveCommandPermission(ctx, input.commandId);
+  }
   const db = createHeadlessAgentAdminClient();
   const { data, error } = await db.rpc("resolve_headless_agent_run_decision", {
     p_agent_id: ctx.agent.id,

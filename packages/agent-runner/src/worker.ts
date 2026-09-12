@@ -568,6 +568,8 @@ export class AgentWorker {
           fingerprint: candidate.fingerprint,
           expiresAt: candidate.expiresAt,
           description: candidate.description,
+          purpose: candidate.purpose,
+          blockers: candidate.blockers,
         }),
       );
       const frameExpiresAt = frameCandidates?.reduce(
@@ -596,6 +598,10 @@ export class AgentWorker {
                   expectedExecutionVersion,
                   candidates: frameCandidates,
                   expiresAt: frameExpiresAt,
+                  balances: report.decisionFrameDraft.balances,
+                  platformBlockers: report.decisionFrameDraft.platformBlockers,
+                  ownerPolicyBlockers:
+                    report.decisionFrameDraft.ownerPolicyBlockers,
                 }
               : {
                 // The resolver matches on this id, so a decision written

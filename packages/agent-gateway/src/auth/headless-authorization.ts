@@ -8,12 +8,28 @@ import {
   type AuthorizationTypedMessage,
 } from "@p2e/agent-contracts";
 import { createHeadlessAgentAdminClient } from "@/lib/supabase/headless-agent-schema";
-import { findOwnedAgent, loadPermissions } from "../db/agents";
+import { DEFAULT_SLIPPAGE_BPS } from "@/lib/uniswap/constants";
+import {
+  findOwnedAgent,
+  hasCapability,
+  loadPermissions,
+  type AgentPermission,
+} from "../db/agents";
 import {
   AGENT_CHAIN_ID,
   headlessAgentResource,
   headlessCredentialPepperKeyring,
 } from "../env";
+
+const NO_EXPIRY_SENTINEL = 0;
+
+export const DAILY_QUEST_CAPABILITIES = [
+  "quests.read",
+  "quests.start",
+  "tasks.complete",
+  "tasks.claim",
+  "quests.complete",
+] as const;
 
 export const HEADLESS_AUTHORIZATION_DOMAIN = {
   name: "P2E Inferno Agent Authorization",
@@ -47,24 +63,6 @@ export const HEADLESS_CREDENTIAL_ROTATION_TYPES = {
   ],
 } as const;
 
-const ACTION_VERSIONS = new Map<string, number>([
-  ["p2e_uniswap_swap", 2],
-  ["p2e_vendor_buy", 2],
-  ["p2e_vendor_sell", 2],
-  ["p2e_vendor_light_up", 2],
-  ["p2e_vendor_level_up", 2],
-  ["p2e_eth_transfer", 1],
-  ["p2e_erc20_transfer", 1],
-  ["p2e_deploy_lock", 1],
-  ["p2e_daily_checkin", 1],
-  ["p2e_gas_drop", 1],
-  ["approval.erc20", 1],
-  ["approval.permit2", 1],
-  ["x402.payment", 1],
-  ["quest.claim", 1],
-  ["quest.settle", 1],
-]);
-
 export interface HeadlessAuthorization {
   id: string;
   agentId: string;
@@ -73,7 +71,7 @@ export interface HeadlessAuthorization {
   policy: AuthorizationPolicyV1;
   policyHash: string;
   status: string;
-  expiresAt: string;
+  expiresAt: string | null;
   activatedAt: string | null;
 }
 
@@ -89,30 +87,65 @@ function typedDomain(chainId = AGENT_CHAIN_ID) {
   return { ...HEADLESS_AUTHORIZATION_DOMAIN, chainId };
 }
 
-async function validatePolicyScope(agentId: string, policy: AuthorizationPolicyV1) {
-  for (const action of policy.actions) {
-    if (ACTION_VERSIONS.get(action.actionId) !== action.version) {
-      throw new Error("ACTION_POLICY_VERSION_UNAVAILABLE");
-    }
-  }
-
+async function validatePolicyScope(
+  agentId: string,
+  policy: AuthorizationPolicyV1,
+) {
   const permissions = await loadPermissions(agentId);
-  const scopedTemplates = new Set(
-    permissions
-      .map((permission) => permission.dailyQuestTemplateId)
-      .filter((templateId): templateId is string => Boolean(templateId)),
-  );
-  const hasUnscopedQuestPermission = permissions.some(
-    (permission) =>
-      permission.dailyQuestTemplateId === null &&
-      permission.capability !== "quests.read",
-  );
   if (
-    !hasUnscopedQuestPermission &&
-    policy.templateIds.some((templateId) => !scopedTemplates.has(templateId))
+    policy.templateIds.some(
+      (templateId) => !hasLiveDailyQuestPermission(permissions, templateId),
+    )
   ) {
     throw new Error("TEMPLATE_SCOPE_DENIED");
   }
+}
+
+export function hasLiveDailyQuestPermission(
+  permissions: AgentPermission[],
+  templateId: string,
+): boolean {
+  return DAILY_QUEST_CAPABILITIES.every((capability) =>
+    hasCapability(permissions, capability, templateId),
+  );
+}
+
+export function headlessPolicyAllowsTemplate(
+  policy: AuthorizationPolicyV1,
+  templateId: string,
+): boolean {
+  return policy.templateIds.length === 0 || policy.templateIds.includes(templateId);
+}
+
+const DEFAULT_POLICY_LIMITS = {
+  maxGasPerActionRaw: "2000000000000000", // 0.002 ETH
+  maxGasPerRunRaw: "10000000000000000", // 0.01 ETH
+  maxGasRolling24hRaw: "30000000000000000", // 0.03 ETH
+  maxX402PerRequestRaw: "50000", // $0.05 (6-decimal USDC raw units)
+  maxX402PerRunRaw: "500000", // $0.50
+  maxX402Rolling24hRaw: "2000000", // $2.00
+  maxServiceFeePerActionRaw: "50000",
+  maxServiceFeePerRunRaw: "500000",
+  maxServiceFeeRolling24hRaw: "2000000",
+  minNativeReserveRaw: "2000000000000000", // 0.002 ETH kept for gas
+  maxFundingSwapsPerRun: 20,
+  maxSlippageBps: DEFAULT_SLIPPAGE_BPS,
+} as const;
+
+function normalizePolicyInput(rawPolicy: unknown): unknown {
+  const partial =
+    rawPolicy && typeof rawPolicy === "object"
+      ? (rawPolicy as Record<string, unknown>)
+      : {};
+  return {
+    ...DEFAULT_POLICY_LIMITS,
+    templateIds: [],
+    actions: [],
+    ...partial,
+    version: 1,
+    chain: `eip155:${AGENT_CHAIN_ID}`,
+    resource: headlessAgentResource(),
+  };
 }
 
 export async function createAuthorizationDraft(input: {
@@ -122,11 +155,10 @@ export async function createAuthorizationDraft(input: {
   policy: unknown;
   expiresAt?: string;
 }) {
-  const policy = authorizationPolicyV1Schema.parse(input.policy);
+  const policy = authorizationPolicyV1Schema.parse(
+    normalizePolicyInput(input.policy),
+  );
   const resource = headlessAgentResource();
-  if (policy.chain !== `eip155:${AGENT_CHAIN_ID}` || policy.resource !== resource) {
-    throw new Error("POLICY_RESOURCE_MISMATCH");
-  }
 
   const agent = await findOwnedAgent(input.agentId, input.ownerUserId);
   if (!agent || agent.status !== "ready" || !agent.agentWallet) {
@@ -138,15 +170,16 @@ export async function createAuthorizationDraft(input: {
   await validatePolicyScope(agent.id, policy);
 
   const now = Math.floor(Date.now() / 1000);
-  const requestedExpiry = input.expiresAt
-    ? Math.floor(Date.parse(input.expiresAt) / 1000)
-    : now + 30 * 24 * 60 * 60;
-  if (
-    !Number.isSafeInteger(requestedExpiry) ||
-    requestedExpiry <= now ||
-    requestedExpiry > now + 90 * 24 * 60 * 60
-  ) {
-    throw new Error("AUTHORIZATION_EXPIRY_INVALID");
+  // Owner-set expiry is optional: the product intent is "grant once, keep
+  // until changed or revoked," not a forced periodic reauthorization cycle.
+  // Absent an explicit choice, the authorization never expires automatically;
+  // an owner who wants a shorter window may still request one via `expiresAt`.
+  let requestedExpiry: number | null = null;
+  if (input.expiresAt) {
+    requestedExpiry = Math.floor(Date.parse(input.expiresAt) / 1000);
+    if (!Number.isSafeInteger(requestedExpiry) || requestedExpiry <= now) {
+      throw new Error("AUTHORIZATION_EXPIRY_INVALID");
+    }
   }
 
   const authorizationId = randomUUID();
@@ -164,7 +197,7 @@ export async function createAuthorizationDraft(input: {
     policyHash,
     nonce,
     issuedAt: now,
-    expiresAt: requestedExpiry,
+    expiresAt: requestedExpiry ?? NO_EXPIRY_SENTINEL,
   });
 
   const db = createHeadlessAgentAdminClient();
@@ -182,7 +215,9 @@ export async function createAuthorizationDraft(input: {
     chain_id: AGENT_CHAIN_ID,
     nonce,
     issued_at: new Date(now * 1000).toISOString(),
-    expires_at: new Date(requestedExpiry * 1000).toISOString(),
+    expires_at: requestedExpiry
+      ? new Date(requestedExpiry * 1000).toISOString()
+      : null,
     draft_expires_at: new Date((now + 10 * 60) * 1000).toISOString(),
     status: "draft",
   });
@@ -190,7 +225,9 @@ export async function createAuthorizationDraft(input: {
 
   return {
     authorizationId,
-    expiresAt: new Date(requestedExpiry * 1000).toISOString(),
+    expiresAt: requestedExpiry
+      ? new Date(requestedExpiry * 1000).toISOString()
+      : null,
     draftExpiresAt: new Date((now + 10 * 60) * 1000).toISOString(),
     policy,
     typedData: {
@@ -202,7 +239,9 @@ export async function createAuthorizationDraft(input: {
   };
 }
 
-function authorizationFromRow(row: Record<string, unknown>): HeadlessAuthorization {
+function authorizationFromRow(
+  row: Record<string, unknown>,
+): HeadlessAuthorization {
   return {
     id: String(row.id),
     agentId: String(row.agent_id),
@@ -211,7 +250,7 @@ function authorizationFromRow(row: Record<string, unknown>): HeadlessAuthorizati
     policy: authorizationPolicyV1Schema.parse(row.policy),
     policyHash: String(row.policy_hash),
     status: String(row.status),
-    expiresAt: String(row.expires_at),
+    expiresAt: typeof row.expires_at === "string" ? row.expires_at : null,
     activatedAt: typeof row.activated_at === "string" ? row.activated_at : null,
   };
 }
@@ -247,7 +286,9 @@ export async function activateAuthorization(input: {
     policyHash: data.policy_hash,
     nonce: data.nonce,
     issuedAt: Math.floor(Date.parse(data.issued_at) / 1000),
-    expiresAt: Math.floor(Date.parse(data.expires_at) / 1000),
+    expiresAt: data.expires_at
+      ? Math.floor(Date.parse(data.expires_at) / 1000)
+      : NO_EXPIRY_SENTINEL,
   };
   let recovered: string;
   try {
@@ -287,13 +328,18 @@ export async function loadActiveAuthorization(agentId: string) {
     .select("*")
     .eq("agent_id", agentId)
     .eq("status", "active")
-    .gt("expires_at", new Date().toISOString())
+    .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
     .maybeSingle();
   if (error) throw error;
-  return data ? authorizationFromRow(data as unknown as Record<string, unknown>) : null;
+  return data
+    ? authorizationFromRow(data as unknown as Record<string, unknown>)
+    : null;
 }
 
-export async function loadOwnerAuthorization(agentId: string, ownerUserId: string) {
+export async function loadOwnerAuthorization(
+  agentId: string,
+  ownerUserId: string,
+) {
   const db = createHeadlessAgentAdminClient();
   const { data, error } = await db
     .from("agent_authorizations")
@@ -304,7 +350,9 @@ export async function loadOwnerAuthorization(agentId: string, ownerUserId: strin
     .limit(1)
     .maybeSingle();
   if (error) throw error;
-  return data ? authorizationFromRow(data as unknown as Record<string, unknown>) : null;
+  return data
+    ? authorizationFromRow(data as unknown as Record<string, unknown>)
+    : null;
 }
 
 function credentialDigest(secret: string, pepper: string): string {
@@ -328,15 +376,17 @@ export async function createCredentialRotationDraft(input: {
   const nonce = `0x${randomBytes(32).toString("hex")}`;
   const expiresAt = Math.floor(Date.now() / 1000) + 10 * 60;
   const db = createHeadlessAgentAdminClient();
-  const { error } = await db.from("agent_credential_rotation_challenges").insert({
-    id: challengeId,
-    agent_id: input.agentId,
-    owner_user_id: input.ownerUserId,
-    owner_wallet: input.ownerWallet.toLowerCase(),
-    authorization_id: authorization.id,
-    nonce,
-    expires_at: new Date(expiresAt * 1000).toISOString(),
-  });
+  const { error } = await db
+    .from("agent_credential_rotation_challenges")
+    .insert({
+      id: challengeId,
+      agent_id: input.agentId,
+      owner_user_id: input.ownerUserId,
+      owner_wallet: input.ownerWallet.toLowerCase(),
+      authorization_id: authorization.id,
+      nonce,
+      expires_at: new Date(expiresAt * 1000).toISOString(),
+    });
   if (error) throw error;
   return {
     challengeId,
@@ -417,6 +467,7 @@ export async function rotateHeadlessCredential(input: {
       p_client_id: clientId,
       p_secret_digest: digest,
       p_pepper_kid: keyring.currentKid,
+      p_secret_hint: clientSecret.slice(-6),
       p_scopes: [
         "agent:read",
         "quests:read",
@@ -432,10 +483,23 @@ export async function rotateHeadlessCredential(input: {
   if (outcome.outcome !== "active") {
     throw new Error(String(outcome.outcome ?? "CREDENTIAL_ROTATION_FAILED"));
   }
-  return { clientId, clientSecret, scopes: ["agent:read", "quests:read", "quests:run", "quests:decide", "quests:cancel"] };
+  return {
+    clientId,
+    clientSecret,
+    scopes: [
+      "agent:read",
+      "quests:read",
+      "quests:run",
+      "quests:decide",
+      "quests:cancel",
+    ],
+  };
 }
 
-export async function verifyHeadlessCredential(clientId: string, clientSecret: string) {
+export async function verifyHeadlessCredential(
+  clientId: string,
+  clientSecret: string,
+) {
   const db = createHeadlessAgentAdminClient();
   const { data, error } = await db
     .from("agent_authorization_credentials")
@@ -444,17 +508,24 @@ export async function verifyHeadlessCredential(clientId: string, clientSecret: s
     .eq("status", "active")
     .maybeSingle();
   if (error) throw error;
-  if (!data || (data.expires_at && Date.parse(data.expires_at) <= Date.now())) return null;
+  if (!data || (data.expires_at && Date.parse(data.expires_at) <= Date.now()))
+    return null;
 
   const keyring = headlessCredentialPepperKeyring();
   const pepper = keyring.peppers.get(data.pepper_kid);
   if (!pepper) return null;
   const actual = Buffer.from(credentialDigest(clientSecret, pepper), "hex");
   const expected = Buffer.from(data.secret_digest, "hex");
-  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
+    return null;
 
+  // The credential authenticates "this client may control Agent X" — live
+  // authority comes from whatever authorization is CURRENTLY active for that
+  // agent, not from one specific authorization the credential was minted
+  // against. A renewal supersedes the old authorization with a new id; a
+  // still-active, unrevoked credential must keep working across that.
   const authorization = await loadActiveAuthorization(data.agent_id);
-  if (!authorization || data.authorization_id !== authorization.id) return null;
+  if (!authorization) return null;
   const agent = await findOwnedAgent(data.agent_id, authorization.ownerUserId);
   if (!agent || agent.status !== "ready") return null;
 
@@ -465,10 +536,14 @@ export async function verifyHeadlessCredential(clientId: string, clientSecret: s
   return { credential: data, authorization, agent };
 }
 
+/**
+ * Whether the credential itself is still live. Deliberately agent-scoped
+ * only — the currently active authorization (which may have been renewed
+ * since this credential was minted) is checked separately by the caller.
+ */
 export async function credentialIsActive(
   credentialId: string,
   agentId: string,
-  authorizationId: string,
 ): Promise<boolean> {
   const db = createHeadlessAgentAdminClient();
   const { data, error } = await db
@@ -476,7 +551,6 @@ export async function credentialIsActive(
     .select("id")
     .eq("id", credentialId)
     .eq("agent_id", agentId)
-    .eq("authorization_id", authorizationId)
     .eq("status", "active")
     .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
     .maybeSingle();

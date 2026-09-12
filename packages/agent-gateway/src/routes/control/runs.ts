@@ -22,7 +22,8 @@ export const START = createHeadlessControlRoute({
   mutation: true,
   handler: async (req, _params, context) => {
     const parsed = startSchema.safeParse(await req.json().catch(() => null));
-    if (!parsed.success) return controlJson({ ok: false, code: "INVALID_REQUEST" }, 400);
+    if (!parsed.success)
+      return controlJson({ ok: false, code: "INVALID_REQUEST" }, 400);
     return startHeadlessRun(context, {
       ...parsed.data,
       requestId: req.headers.get("idempotency-key")!,
@@ -46,7 +47,8 @@ export const CHOOSE = createHeadlessControlRoute({
   handler: async (req, params, context) => {
     if (!params.commandId) throw new Error("RUN_NOT_FOUND");
     const parsed = chooseSchema.safeParse(await req.json().catch(() => null));
-    if (!parsed.success) return controlJson({ ok: false, code: "INVALID_REQUEST" }, 400);
+    if (!parsed.success)
+      return controlJson({ ok: false, code: "INVALID_REQUEST" }, 400);
     if ("frameId" in parsed.data) {
       return chooseHeadlessCandidate(context, {
         commandId: params.commandId,
@@ -66,7 +68,9 @@ export const CHOOSE = createHeadlessControlRoute({
   },
 });
 
-const cancelSchema = z.object({ expectedVersion: z.number().int().nonnegative() }).strict();
+const cancelSchema = z
+  .object({ expectedVersion: z.number().int().nonnegative() })
+  .strict();
 
 export const CANCEL = createHeadlessControlRoute({
   scope: "quests:cancel",
@@ -74,7 +78,11 @@ export const CANCEL = createHeadlessControlRoute({
   handler: async (req, params, context) => {
     if (!params.commandId) throw new Error("RUN_NOT_FOUND");
     const parsed = cancelSchema.safeParse(await req.json().catch(() => null));
-    if (!parsed.success) return controlJson({ ok: false, code: "INVALID_REQUEST" }, 400);
-    return cancelHeadlessRun(context, { commandId: params.commandId, ...parsed.data });
+    if (!parsed.success)
+      return controlJson({ ok: false, code: "INVALID_REQUEST" }, 400);
+    return cancelHeadlessRun(context, {
+      commandId: params.commandId,
+      ...parsed.data,
+    });
   },
 });

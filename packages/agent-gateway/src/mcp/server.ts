@@ -28,7 +28,9 @@ function toolResult(data: unknown) {
 function toolFailure(error: unknown) {
   const code = error instanceof Error ? error.message : "INTERNAL_ERROR";
   return {
-    content: [{ type: "text" as const, text: JSON.stringify({ ok: false, code }) }],
+    content: [
+      { type: "text" as const, text: JSON.stringify({ ok: false, code }) },
+    ],
     structuredContent: { result: { ok: false, code } },
     isError: true,
   };
@@ -58,40 +60,48 @@ export function createHeadlessMcpServer(context: HeadlessControlContext) {
   server.registerTool(
     "agent_get_config",
     {
-      description: "Read this agent's immutable authorization and current limits.",
+      description:
+        "Read this agent's immutable authorization and current limits.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    async () => requireScope(context, "agent:read", () => getHeadlessConfig(context)),
+    async () =>
+      requireScope(context, "agent:read", () => getHeadlessConfig(context)),
   );
 
   server.registerTool(
     "quest_list",
     {
-      description: "List currently available quests allowed by the signed policy.",
+      description:
+        "List currently available quests allowed by the signed policy.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    async () => requireScope(context, "quests:read", () => listHeadlessQuests(context)),
+    async () =>
+      requireScope(context, "quests:read", () => listHeadlessQuests(context)),
   );
 
   server.registerTool(
     "quest_assess",
     {
-      description: "Assess one quest without starting it or spending task funds.",
+      description:
+        "Assess one quest without starting it or spending task funds.",
       inputSchema: {
         runId: z.string().uuid(),
       },
       annotations: { readOnlyHint: true },
     },
     async ({ runId }) =>
-      requireScope(context, "quests:read", () => assessHeadlessQuest(context, runId)),
+      requireScope(context, "quests:read", () =>
+        assessHeadlessQuest(context, runId),
+      ),
   );
 
   server.registerTool(
-    "quest_start",
+    "agent_run_start",
     {
-      description: "Create a durable quest command; returns immediately for status polling.",
+      description:
+        "Create a durable agent run command; returns immediately for status polling.",
       inputSchema: {
         runId: z.string().uuid(),
         requestId: z.string().min(1).max(200),
@@ -99,24 +109,30 @@ export function createHeadlessMcpServer(context: HeadlessControlContext) {
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    async (input) => requireScope(context, "quests:run", () => startHeadlessRun(context, input)),
+    async (input) =>
+      requireScope(context, "quests:run", () =>
+        startHeadlessRun(context, input),
+      ),
   );
 
   server.registerTool(
-    "quest_status",
+    "agent_run_status",
     {
-      description: "Read command progress and any current decision frame.",
+      description: "Read agent run progress and any current decision frame.",
       inputSchema: { commandId: z.string().uuid() },
       annotations: { readOnlyHint: true },
     },
     async ({ commandId }) =>
-      requireScope(context, "agent:read", () => getHeadlessRun(context, commandId)),
+      requireScope(context, "agent:read", () =>
+        getHeadlessRun(context, commandId),
+      ),
   );
 
   server.registerTool(
-    "quest_choose",
+    "agent_run_choose",
     {
-      description: "Choose exactly one server-issued candidate from the current frame.",
+      description:
+        "Choose exactly one server-issued candidate from the current agent run decision frame.",
       inputSchema: {
         commandId: z.string().uuid(),
         requestId: z.string().min(1).max(200),
@@ -140,9 +156,10 @@ export function createHeadlessMcpServer(context: HeadlessControlContext) {
   );
 
   server.registerTool(
-    "quest_cancel",
+    "agent_run_cancel",
     {
-      description: "Cancel a headless command that has not reached a terminal state.",
+      description:
+        "Cancel an agent run command that has not reached a terminal state.",
       inputSchema: {
         commandId: z.string().uuid(),
         requestId: z.string().min(1).max(200),
@@ -163,7 +180,8 @@ export function createHeadlessMcpServer(context: HeadlessControlContext) {
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
-    async () => requireScope(context, "agent:read", () => getHeadlessUsage(context)),
+    async () =>
+      requireScope(context, "agent:read", () => getHeadlessUsage(context)),
   );
 
   return server;

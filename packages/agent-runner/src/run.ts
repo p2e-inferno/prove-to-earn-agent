@@ -21,6 +21,7 @@ import {
 import {
   executeCandidate as executeBoundCandidate,
   observeCandidates,
+  type CandidateObservation,
 } from "./candidates";
 import { actionForTaskType } from "./actions/registry";
 import {
@@ -70,6 +71,14 @@ export interface RunReport extends RunFacts {
 
 export interface DecisionFrameDraft {
   stateVersion: string;
+  balances: AssetAmount[];
+  platformBlockers: Array<{ taskId: string; code: string; message: string }>;
+  ownerPolicyBlockers: Array<{
+    taskId: string;
+    code: string;
+    message: string;
+    deficitRaw?: string;
+  }>;
   candidates: Array<{
     candidateId: `cand_${string}`;
     stateVersion: string;
@@ -87,6 +96,14 @@ export interface DecisionFrameDraft {
     fingerprint: `0x${string}`;
     expiresAt: string;
     description: string;
+    purpose?:
+      | { kind: "quest_task"; taskId: string }
+      | { kind: "prerequisite"; forTaskId: string };
+    blockers?: Array<{
+      code: string;
+      message: string;
+      resolution: "agent" | "owner" | "time" | "fatal";
+    }>;
   }>;
 }
 
@@ -124,13 +141,23 @@ function firstAddress(value: unknown): `0x${string}` | null {
 }
 
 function decisionDraft(
-  stateVersion: string,
-  candidates: ActionCandidate[],
+  observation: Pick<
+    CandidateObservation,
+    "stateVersion" | "balances" | "ownerBlockers" | "fatalBlockers" | "candidates"
+  >,
 ): DecisionFrameDraft {
   const now = Date.now();
   return {
-    stateVersion,
-    candidates: candidates.map((candidate) => {
+    stateVersion: observation.stateVersion,
+    balances: observation.balances,
+    platformBlockers: observation.fatalBlockers,
+    ownerPolicyBlockers: observation.ownerBlockers.map((blocker) => ({
+      taskId: blocker.taskId,
+      code: blocker.code,
+      message: blocker.message,
+      deficitRaw: blocker.deficits?.[0]?.raw,
+    })),
+    candidates: observation.candidates.map((candidate) => {
       const principal = candidate.analysis.economics.value.principal;
       const marketExpiry = candidate.actionName === "p2e_uniswap_swap" ? 60_000 : 300_000;
       const defaultExpiry = new Date(now + marketExpiry).toISOString();
@@ -160,6 +187,16 @@ function decisionDraft(
         fingerprint,
         expiresAt,
         description: candidate.explanation,
+        purpose:
+          candidate.purpose.kind === "quest_task"
+            ? { kind: "quest_task" as const, taskId: candidate.purpose.taskId }
+            : {
+                kind: "prerequisite" as const,
+                forTaskId: candidate.purpose.forTaskId,
+              },
+        blockers: candidate.analysis.blockers.length
+          ? candidate.analysis.blockers
+          : undefined,
       };
     }),
   };
@@ -833,10 +870,7 @@ export async function runDailyQuest(
   ) {
     const observation = await observe();
     if (observation.candidates.length > 0) {
-      decisionFrameDraft = decisionDraft(
-        observation.stateVersion,
-        observation.candidates,
-      );
+      decisionFrameDraft = decisionDraft(observation);
       blockingCode = "EXTERNAL_DECISION_REQUIRED";
       blockingReason =
         "The external client must choose one current candidate before funds are used.";
@@ -1157,8 +1191,8 @@ export async function runDailyQuest(
       | undefined =
       planned?.ownerBlockers[0] ??
       planned?.fatalBlockers[0] ??
-      (planned?.stopCode ? { code: planned.stopCode } : undefined) ??
       (actionFailure && "code" in actionFailure ? actionFailure : undefined) ??
+      (planned?.stopCode ? { code: planned.stopCode } : undefined) ??
       stuck;
     blockingCode ??= cause?.code;
     const explained = cause?.message ?? cause?.detail;

@@ -48,6 +48,13 @@ export interface AgentPermission {
   dailyQuestTemplateId: string | null;
 }
 
+/**
+ * ALL and NONE are both first-class, deliberate choices — never inferred
+ * from an empty/absent template list, which previously collapsed
+ * indistinguishably into "unscoped" (ALL).
+ */
+export type TemplateScope = "all" | "selected" | "none";
+
 export interface AgentCapacity {
   current: number;
   limit: number;
@@ -256,6 +263,7 @@ export async function createPlatformAgent(input: {
   rewardWallet: string;
   displayName: string;
   capabilities: AgentCapability[];
+  templateScope: TemplateScope;
   templateIds: string[];
   maxFundingSwaps: number | null;
   ownerLimit: number;
@@ -269,7 +277,8 @@ export async function createPlatformAgent(input: {
     p_reward_wallet: input.rewardWallet.toLowerCase(),
     p_label: input.displayName,
     p_capabilities: input.capabilities,
-    p_template_ids: input.templateIds.length ? input.templateIds : null,
+    p_template_scope: input.templateScope,
+    p_template_ids: input.templateScope === "selected" ? input.templateIds : null,
     p_max_funding_swaps: input.maxFundingSwaps,
     p_owner_limit: input.ownerLimit,
   });
@@ -331,6 +340,48 @@ export async function updatePlatformAgent(
         : input.maxFundingSwaps,
     p_expected_version: current.lifecycleVersion,
   });
+  if (error) throw error;
+  if (!data) return null;
+  return findAgentById(agentId);
+}
+
+/**
+ * Full reconcile, not incremental add/remove: the owner submits the complete
+ * desired capability set and template scope, and `update_platform_agent_permissions`
+ * atomically replaces the existing `agent_permissions` rows to match. This is
+ * the only way to add or remove a capability/template after agent creation —
+ * permissions were previously insert-only.
+ */
+export async function updateAgentPermissions(
+  agentId: string,
+  ownerUserId: string,
+  input: {
+    capabilities: AgentCapability[];
+    templateScope: TemplateScope;
+    templateIds: string[];
+  },
+): Promise<RegisteredAgent | null> {
+  const current = await findAgentById(agentId);
+  if (
+    !current ||
+    current.ownerUserId !== ownerUserId ||
+    current.status === "revoked"
+  ) {
+    return null;
+  }
+  const supabase = createAgentAdminClient();
+  const { data, error } = await supabase.rpc(
+    "update_platform_agent_permissions",
+    {
+      p_agent_id: agentId,
+      p_owner_user_id: ownerUserId,
+      p_capabilities: input.capabilities,
+      p_template_scope: input.templateScope,
+      p_template_ids:
+        input.templateScope === "selected" ? input.templateIds : null,
+      p_expected_version: current.lifecycleVersion,
+    },
+  );
   if (error) throw error;
   if (!data) return null;
   return findAgentById(agentId);

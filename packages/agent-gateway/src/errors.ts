@@ -19,6 +19,9 @@ export type AgentErrorCode =
   | "SETTLEMENT_FAILED"
   | "INTERNAL_ERROR";
 
+// Kept in sync with the retryable rate-limit codes in `control/route.ts`'s
+// `controlJson` responses — the same code must mean the same retry guidance
+// regardless of which envelope builder produced it.
 const RETRYABLE = new Set<string>([
   "SETTLEMENT_FAILED",
   "IDEMPOTENCY_IN_FLIGHT",
@@ -28,6 +31,9 @@ const RETRYABLE = new Set<string>([
   "XP_AWARD_FAILED",
   "BONUS_AWARD_FAILED",
   "KEY_GRANT_FAILED",
+  "RATE_LIMITED",
+  "WORLD_RATE_LIMITED",
+  "RATE_LIMIT_UNAVAILABLE",
 ]);
 
 export interface AgentEnvelope<T = unknown> {

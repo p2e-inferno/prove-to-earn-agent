@@ -806,7 +806,12 @@ describe("runDailyQuest", () => {
         kind: "prerequisite" as const,
         forTaskId: "t1",
         resolves: [
-          { kind: "asset" as const, asset: "UP" as const, requiredRaw: "10" },
+          {
+            kind: "asset" as const,
+            asset: "UP" as const,
+            requiredRaw: "10",
+            deficitRaw: "10",
+          },
         ],
       },
     } as ActionCandidate;

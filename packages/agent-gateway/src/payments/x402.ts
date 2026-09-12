@@ -5,6 +5,7 @@ import {
   type RouteConfig,
 } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
+import { withX402FromHTTPServer } from "@x402/next";
 import {
   createAgentkitHooks,
   agentkitResourceServerExtension,
@@ -12,6 +13,7 @@ import {
 } from "@worldcoin/agentkit";
 import { createAgentBookVerifier } from "@worldcoin/agentkit-core";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
+import { NextRequest, type NextResponse } from "next/server";
 import { getLogger } from "@/lib/utils/logger";
 import {
   AGENT_NETWORK,
@@ -181,6 +183,40 @@ export function getHttpResourceServer(routeId: string): x402HTTPResourceServer {
 
   httpServers.set(routeId, httpServer);
   return httpServer;
+}
+
+export function canonicalRoutePath(
+  routeId: string,
+  params: Record<string, string> = {},
+): string {
+  return routeSpec(routeId).path.replace(/\[([^\]]+)\]/g, (_match, name) => {
+    const value = params[name];
+    if (!value) throw new Error(`Missing canonical route parameter: ${name}`);
+    return encodeURIComponent(value);
+  });
+}
+
+export async function invokeCanonicalEconomicRoute(
+  request: NextRequest,
+  options: {
+    routeId: string;
+    params?: Record<string, string>;
+    handler: () => Promise<NextResponse>;
+  },
+): Promise<NextResponse> {
+  const spec = routeSpec(options.routeId);
+  const url = new URL(request.url);
+  url.pathname = canonicalRoutePath(options.routeId, options.params);
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  const paymentRequest = new NextRequest(url, {
+    method: spec.method,
+    headers,
+  });
+  return withX402FromHTTPServer(
+    options.handler,
+    getHttpResourceServer(options.routeId),
+  )(paymentRequest) as Promise<NextResponse>;
 }
 
 /**

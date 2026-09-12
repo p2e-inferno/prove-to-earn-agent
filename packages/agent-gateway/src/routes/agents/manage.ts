@@ -13,9 +13,11 @@ import {
   createPlatformAgent,
   listAgentsPageForOwner,
   revokeAgent,
+  updateAgentPermissions,
   updatePlatformAgent,
   type AgentCapability,
   type RegisteredAgent,
+  type TemplateScope,
 } from "../../db/agents";
 import { agentOwnerLimit } from "../../env";
 import { createPairingRoute } from "../../route-factory";
@@ -30,25 +32,55 @@ const capabilities = [
   "quests.complete",
 ] as const satisfies readonly AgentCapability[];
 
+const templateScopeSchema = z.enum(["all", "selected", "none"]) satisfies z.ZodType<TemplateScope>;
+
+const templateScopeFields = {
+  // ALL/SELECTED/NONE is an explicit choice, never inferred from whether
+  // templateIds happens to be empty — an empty array under "selected" is
+  // rejected below rather than silently read back as "all" or "none".
+  templateScope: templateScopeSchema,
+  templateIds: z.array(z.string().uuid()).max(100).default([]),
+};
+
 const createSchema = z
   .object({
     displayName: z.string().trim().min(2).max(40),
     rewardWallet: z.string().refine(ethers.isAddress),
     capabilities: z.array(z.enum(capabilities)).min(1),
-    templateIds: z.array(z.string().uuid()).max(100).default([]),
+    ...templateScopeFields,
     maxFundingSwaps: z.number().int().min(0).max(32).nullable().default(null),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.templateScope !== "selected" || value.templateIds.length > 0,
+    { message: "Select at least one template, or choose All or None", path: ["templateIds"] },
+  );
+
+const permissionsUpdateSchema = z
+  .object({
+    capabilities: z.array(z.enum(capabilities)).min(1),
+    ...templateScopeFields,
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.templateScope !== "selected" || value.templateIds.length > 0,
+    { message: "Select at least one template, or choose All or None", path: ["templateIds"] },
+  );
 
 const updateSchema = z
   .object({
     displayName: z.string().trim().min(2).max(40).optional(),
     maxFundingSwaps: z.number().int().min(0).max(32).nullable().optional(),
+    permissions: permissionsUpdateSchema.optional(),
   })
   .strict()
   .refine(
     (value) =>
-      value.displayName !== undefined || value.maxFundingSwaps !== undefined,
+      value.displayName !== undefined ||
+      value.maxFundingSwaps !== undefined ||
+      value.permissions !== undefined,
   );
 
 export function publicAgent(
@@ -169,6 +201,7 @@ export const CREATE = createPairingRoute({
       rewardWallet: parsed.data.rewardWallet,
       displayName: parsed.data.displayName,
       capabilities: parsed.data.capabilities,
+      templateScope: parsed.data.templateScope,
       templateIds: parsed.data.templateIds,
       maxFundingSwaps: parsed.data.maxFundingSwaps,
       ownerLimit: agentOwnerLimit(),
@@ -243,18 +276,38 @@ export const PATCH = createPairingRoute({
       return agentError(400, "INVALID_REQUEST", "Invalid agent settings");
     }
 
-    const updated = await updatePlatformAgent(params.agentId, ownerUserId, {
-      displayName: parsed.data.displayName,
-      maxFundingSwaps: parsed.data.maxFundingSwaps,
-    });
-    if (!updated) {
-      return agentError(
-        404,
-        "AGENT_UNKNOWN",
-        "Agent not found for this account",
-      );
+    let updated: RegisteredAgent | null = null;
+    if (
+      parsed.data.displayName !== undefined ||
+      parsed.data.maxFundingSwaps !== undefined
+    ) {
+      updated = await updatePlatformAgent(params.agentId, ownerUserId, {
+        displayName: parsed.data.displayName,
+        maxFundingSwaps: parsed.data.maxFundingSwaps,
+      });
+      if (!updated) {
+        return agentError(
+          404,
+          "AGENT_UNKNOWN",
+          "Agent not found for this account",
+        );
+      }
     }
-    return agentOk({ agent: publicAgent(updated) });
+    if (parsed.data.permissions) {
+      updated = await updateAgentPermissions(params.agentId, ownerUserId, {
+        capabilities: parsed.data.permissions.capabilities,
+        templateScope: parsed.data.permissions.templateScope,
+        templateIds: parsed.data.permissions.templateIds,
+      });
+      if (!updated) {
+        return agentError(
+          409,
+          "AGENT_PERMISSIONS_UPDATE_CONFLICT",
+          "Agent not found, revoked, or its settings changed concurrently",
+        );
+      }
+    }
+    return agentOk({ agent: publicAgent(updated!) });
   },
 });
 

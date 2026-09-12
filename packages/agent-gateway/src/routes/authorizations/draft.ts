@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { authorizationPolicyV1Schema } from "@p2e/agent-contracts";
 import { createAuthorizationDraft } from "../../auth/headless-authorization";
 import {
   createHeadlessOwnerRoute,
@@ -8,7 +7,7 @@ import {
 
 const draftSchema = z
   .object({
-    policy: authorizationPolicyV1Schema,
+    policy: z.record(z.unknown()).optional().default({}),
     expiresAt: z.string().datetime().optional(),
   })
   .strict();

@@ -162,12 +162,13 @@ export async function resolveHeadlessActor(req: NextRequest) {
   const [authorization, agent, credentialActive] = await Promise.all([
     loadActiveAuthorization(claims.agentId),
     findAgentById(claims.agentId),
-    credentialIsActive(
-      claims.credentialId,
-      claims.agentId,
-      claims.authorizationId,
-    ),
+    credentialIsActive(claims.credentialId, claims.agentId),
   ]);
+  // The token's embedded authorizationId reflects whichever authorization was
+  // active when it was minted (access tokens are short-lived, ~10 minutes);
+  // if a renewal happened since, this token goes stale until the client's
+  // next client_credentials exchange picks up the new one — the credential
+  // itself (client_id/secret) is what must survive renewal, not this token.
   if (
     !authorization ||
     authorization.id !== claims.authorizationId ||

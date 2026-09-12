@@ -6,6 +6,20 @@ export const addressSchema = z.string().regex(/^0x[a-fA-F0-9]{40}$/);
 export const bytes32Schema = z.string().regex(/^0x[a-fA-F0-9]{64}$/);
 export const candidateIdSchema = z.string().regex(/^cand_[a-f0-9]{32}$/);
 
+/** A held/observed balance for one asset, formatted for display alongside
+ * its raw integer amount. Mirrors the runner's `AssetAmount` shape so a
+ * decision frame can report balances without a dependency on the runner
+ * package. */
+export const assetAmountRefSchema = z
+  .object({
+    asset: z.string().min(1).max(32),
+    tokenAddress: addressSchema.nullable(),
+    decimals: z.number().int().min(0).max(255),
+    raw: rawAmountSchema,
+    formatted: z.string(),
+  })
+  .strict();
+
 export const actionIdSchema = z.enum([
   "p2e_uniswap_swap",
   "p2e_vendor_buy",
@@ -46,8 +60,8 @@ export const authorizationPolicyV1Schema = z
     version: z.literal(1),
     chain: caip2Schema,
     resource: z.string().url().max(2048),
-    templateIds: z.array(z.string().uuid()).min(1).max(100),
-    actions: z.array(authorizedActionSchema).min(1).max(64),
+    templateIds: z.array(z.string().uuid()).max(100),
+    actions: z.array(authorizedActionSchema).max(64),
     assetLimits: z.array(assetLimitSchema).min(1).max(32),
     maxGasPerActionRaw: rawAmountSchema,
     maxGasPerRunRaw: rawAmountSchema,
@@ -106,7 +120,8 @@ export const authorizationPolicyV1Schema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["assetLimits", index],
-          message: "Asset limits must increase from action to run to rolling window",
+          message:
+            "Asset limits must increase from action to run to rolling window",
         });
       }
     });
@@ -145,9 +160,7 @@ export const authorizationPolicyV1Schema = z
     );
   });
 
-export type AuthorizationPolicyV1 = z.infer<
-  typeof authorizationPolicyV1Schema
->;
+export type AuthorizationPolicyV1 = z.infer<typeof authorizationPolicyV1Schema>;
 
 export const authorizationTypedMessageSchema = z
   .object({
@@ -162,7 +175,8 @@ export const authorizationTypedMessageSchema = z
     policyHash: bytes32Schema,
     nonce: bytes32Schema,
     issuedAt: z.number().int().positive(),
-    expiresAt: z.number().int().positive(),
+    /** 0 is the signed sentinel for "no expiry" — a real timestamp is never 0. */
+    expiresAt: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -184,15 +198,51 @@ export const decisionConsequenceSchema = z
   })
   .strict();
 
+/** Why a candidate is being offered: a quest task itself, or a prerequisite
+ * (funding/approval) that unblocks one. Mirrors `ActionPurpose` in the
+ * runner so a decision authority can explain a candidate without seeing raw
+ * task config. */
+export const decisionCandidatePurposeSchema = z.discriminatedUnion("kind", [
+  z
+    .object({ kind: z.literal("quest_task"), taskId: z.string().min(1) })
+    .strict(),
+  z
+    .object({ kind: z.literal("prerequisite"), forTaskId: z.string().min(1) })
+    .strict(),
+]);
+
+export const decisionCandidateBlockerSchema = z
+  .object({
+    code: z.string().min(1),
+    message: z.string().min(1),
+    resolution: z.enum(["agent", "owner", "time", "fatal"]),
+  })
+  .strict();
+
 export const decisionCandidateV1Schema = z
   .object({
     candidateId: candidateIdSchema,
     frameId: z.string().uuid(),
     expectedExecutionVersion: z.number().int().nonnegative(),
+    /** The candidate-specific observed-state marker (independent of the
+     * frame-level `expectedExecutionVersion`) that the worker re-checks
+     * before honoring a selection — load-bearing for staleness detection,
+     * not display-only. */
+    stateVersion: z.string().min(1),
     consequence: decisionConsequenceSchema,
     fingerprint: bytes32Schema,
     expiresAt: z.string().datetime(),
     description: z.string().min(1).max(1000),
+    purpose: decisionCandidatePurposeSchema.optional(),
+    blockers: z.array(decisionCandidateBlockerSchema).optional(),
+  })
+  .strict();
+
+export const decisionFrameBlockerSchema = z
+  .object({
+    taskId: z.string().min(1),
+    code: z.string().min(1),
+    message: z.string().min(1),
   })
   .strict();
 
@@ -205,6 +255,18 @@ export const decisionFrameV1Schema = z
     expectedExecutionVersion: z.number().int().nonnegative(),
     candidates: z.array(decisionCandidateV1Schema).min(1).max(64),
     expiresAt: z.string().datetime(),
+    /** Execution-wallet balances only, as observed when the frame was built. */
+    balances: z.array(assetAmountRefSchema).optional(),
+    /** Platform-invariant failures — never offered as choices, just context. */
+    platformBlockers: z.array(decisionFrameBlockerSchema).optional(),
+    /** Owner-policy failures that may annotate an otherwise safe candidate. */
+    ownerPolicyBlockers: z
+      .array(
+        decisionFrameBlockerSchema.extend({
+          deficitRaw: z.string().optional(),
+        }),
+      )
+      .optional(),
   })
   .strict();
 

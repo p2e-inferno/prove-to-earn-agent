@@ -28,6 +28,7 @@ export const GET = createHeadlessOwnerRoute(async (_req, params, context) => {
       policyHash: authorization.policyHash,
       status:
         authorization.status === "active" &&
+        authorization.expiresAt !== null &&
         Date.parse(authorization.expiresAt) <= Date.now()
           ? "expired"
           : authorization.status,
@@ -41,22 +42,20 @@ const revokeSchema = z
   .object({ revokeAuthorization: z.boolean().default(true) })
   .strict();
 
-export const DELETE = createHeadlessOwnerRoute(
-  async (req, params, context) => {
-    if (!params.agentId) {
-      return headlessOwnerJson({ error: "INVALID_REQUEST" }, 400);
-    }
-    const parsed = revokeSchema.safeParse(await req.json().catch(() => ({})));
-    if (!parsed.success) {
-      return headlessOwnerJson({ error: "INVALID_REQUEST" }, 400);
-    }
-    const result = await revokeHeadlessAccess({
-      agentId: params.agentId,
-      ownerUserId: context.ownerUserId,
-      revokeAuthorization: parsed.data.revokeAuthorization,
-    });
-    return result.outcome === "not_found"
-      ? headlessOwnerJson({ error: "AGENT_UNKNOWN" }, 404)
-      : headlessOwnerJson({ status: "revoked", ...result });
-  },
-);
+export const DELETE = createHeadlessOwnerRoute(async (req, params, context) => {
+  if (!params.agentId) {
+    return headlessOwnerJson({ error: "INVALID_REQUEST" }, 400);
+  }
+  const parsed = revokeSchema.safeParse(await req.json().catch(() => ({})));
+  if (!parsed.success) {
+    return headlessOwnerJson({ error: "INVALID_REQUEST" }, 400);
+  }
+  const result = await revokeHeadlessAccess({
+    agentId: params.agentId,
+    ownerUserId: context.ownerUserId,
+    revokeAuthorization: parsed.data.revokeAuthorization,
+  });
+  return result.outcome === "not_found"
+    ? headlessOwnerJson({ error: "AGENT_UNKNOWN" }, 404)
+    : headlessOwnerJson({ status: "revoked", ...result });
+});

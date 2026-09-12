@@ -57,7 +57,6 @@ export function createHeadlessOwnerRoute(
     } catch (error) {
       const code = error instanceof Error ? error.message : "INTERNAL_ERROR";
       const clientCodes = new Set([
-        "ACTION_POLICY_VERSION_UNAVAILABLE",
         "TEMPLATE_SCOPE_DENIED",
         "POLICY_RESOURCE_MISMATCH",
         "AUTHORIZATION_EXPIRY_INVALID",
