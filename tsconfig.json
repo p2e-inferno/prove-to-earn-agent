@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ES2021",
+    "lib": ["ES2021", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": false,
+    "noEmit": true,
+    "isolatedModules": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"],
+      "@vendor/*": ["./src/vendor/*"],
+      "@adapters/*": ["./src/adapters/*"],
+      "@p2e/agent-gateway": ["./packages/agent-gateway/src/index.ts"],
+      "@p2e/agent-gateway/*": ["./packages/agent-gateway/src/*"],
+      "@p2e/agent-runner": ["./packages/agent-runner/src/index.ts"],
+      "@p2e/agent-runner/*": ["./packages/agent-runner/src/*"],
+      "@p2e/agent-contracts": ["./packages/agent-contracts/src/index.ts"]
+    },
+    "types": ["node", "jest"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "packages/agent-gateway/src/**/*.ts",
+    "packages/agent-runner/src/**/*.ts",
+    "packages/agent-contracts/src/**/*.ts",
+    "examples/**/*.ts"
+  ],
+  "exclude": ["node_modules", "dist", "reference"]
+}

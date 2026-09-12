@@ -1,0 +1,11 @@
+node_modules/
+dist/
+build/
+.next/
+coverage/
+*.tsbuildinfo
+.env
+.env.local
+.DS_Store
+packages/dg-vendor-subgraph/build/
+packages/dg-vendor-subgraph/generated/

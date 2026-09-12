@@ -1,0 +1,53 @@
+{
+  "name": "prove-to-earn-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "P2E Inferno's x402 agent gateway/runner: the public core carved out for ETHOnline 2026.",
+  "workspaces": [
+    "packages/agent-gateway",
+    "packages/agent-runner",
+    "packages/agent-contracts"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --force",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "example": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" examples/minimal-usage/run.ts"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.14.0",
+    "jest": "^29.7.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ts-jest": "^29.1.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "@coinbase/cdp-sdk": "^1.55.0",
+    "@ethereum-attestation-service/eas-sdk": "^2.9.0",
+    "@privy-io/server-auth": "^1.31.1",
+    "@supabase/supabase-js": "^2.50.0",
+    "@upstash/redis": "^1.37.0",
+    "@worldcoin/agentkit": "0.2.1",
+    "@worldcoin/agentkit-core": "0.2.1",
+    "@x402/core": "^2.25.0",
+    "@x402/evm": "^2.25.0",
+    "@x402/next": "^2.25.0",
+    "@x402/extensions": "^2.25.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@worldcoin/idkit-core": "2.1.0",
+    "ethers": "^6.15.0",
+    "inngest": "^4.0.4",
+    "next": "^16.2.1",
+    "viem": "^2.50.4",
+    "zod": "^3.25.76",
+    "json-canonicalize": "^1.0.6",
+    "jose": "^5.10.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
