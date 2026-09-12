@@ -1,5 +1,5 @@
-import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
-import { DG_TOKEN_VENDOR_ABI } from "@/lib/blockchain/shared/vendor-abi";
+import { UNISWAP_ADDRESSES } from "@vendor/uniswap/constants";
+import { DG_TOKEN_VENDOR_ABI } from "@vendor/blockchain/vendor-abi";
 import type { RunnerConfig } from "./config";
 import type { AgentWallet } from "./wallet";
 

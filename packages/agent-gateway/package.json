@@ -17,7 +17,7 @@
     "@x402/evm": "^2.25.0",
     "@x402/next": "^2.25.0",
     "ethers": "^6.15.0",
-    "jose": "^6.0.12",
+    "jose": "^5.10.0",
     "json-canonicalize": "3.0.1",
     "@coinbase/cdp-sdk": "^1.55.0",
     "@x402/extensions": "^2.25.0"

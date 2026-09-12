@@ -7,7 +7,7 @@ import {
   type SubgraphSwap,
   type VendorAccountTotals,
   type VendorEvent,
-} from "@/lib/graph/queries";
+} from "@vendor/graph-queries";
 import type { RunnerConfig } from "./config";
 import type { AgentWallet } from "./wallet";
 import { paidFetch } from "./paid-fetch";

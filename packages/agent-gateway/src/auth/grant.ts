@@ -1,7 +1,7 @@
 import { randomBytes } from "crypto";
 import { ethers } from "ethers";
-import { createAgentAdminClient } from "@/lib/supabase/agent-schema";
-import { getLogger } from "@/lib/utils/logger";
+import { createAgentAdminClient } from "@adapters/datastore";
+import { getLogger } from "@vendor/logger";
 import {
   AGENT_CHAIN_ID,
   AGENT_CHALLENGE_TTL_SECONDS,

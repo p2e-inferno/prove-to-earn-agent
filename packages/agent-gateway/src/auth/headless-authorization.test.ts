@@ -27,7 +27,7 @@ jest.mock("ethers", () => ({
   },
 }));
 
-jest.mock("@/lib/supabase/headless-agent-schema", () => ({
+jest.mock("@adapters/datastore", () => ({
   createHeadlessAgentAdminClient: jest.fn(),
 }));
 jest.mock("../db/agents", () => ({
@@ -50,7 +50,7 @@ jest.mock("../db/agents", () => ({
     ),
 }));
 
-import { createHeadlessAgentAdminClient } from "@/lib/supabase/headless-agent-schema";
+import { createHeadlessAgentAdminClient } from "@adapters/datastore";
 import { authorizationPolicyV1Schema } from "@p2e/agent-contracts";
 import { findOwnedAgent, loadPermissions } from "../db/agents";
 import type { AgentPermission } from "../db/agents";

@@ -1,6 +1,6 @@
 import { encodeFunctionData } from "viem";
 import { z } from "zod";
-import { ERC20_ABI } from "@/lib/blockchain/shared/abi-definitions";
+import { ERC20_ABI } from "@vendor/blockchain/abi-definitions";
 import {
   actionAnalysisSchema,
   actionEconomics,
@@ -13,7 +13,7 @@ import {
   type ActionDefinition,
   type Asset,
 } from "./types";
-import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
+import { UNISWAP_ADDRESSES } from "@vendor/uniswap/constants";
 import { spendableEth } from "../balances";
 
 const addressSchema = z.string().regex(/^0x[a-fA-F0-9]{40}$/);

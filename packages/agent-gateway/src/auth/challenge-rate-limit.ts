@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
-import { getUpstashRedis } from "@/lib/upstash/redis";
-import { rateLimiter } from "@/lib/utils/rate-limiter";
+import { getUpstashRedis } from "@vendor/upstash-redis";
+import { rateLimiter } from "@vendor/rate-limiter";
 
 const LIMIT = 10;
 const WINDOW_SECONDS = 60;

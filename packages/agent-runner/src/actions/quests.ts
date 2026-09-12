@@ -3,8 +3,8 @@ import { z } from "zod";
 import {
   ADDITIONAL_LOCK_ABI,
   UNLOCK_FACTORY_ABI,
-} from "@/lib/blockchain/shared/abi-definitions";
-import { UNLOCK_FACTORY_ADDRESSES } from "@/constants/unlock_factory_addresses";
+} from "@vendor/blockchain/abi-definitions";
+import { UNLOCK_FACTORY_ADDRESSES } from "@vendor/unlock-factory-addresses";
 import {
   actionAnalysisSchema,
   actionEconomics,

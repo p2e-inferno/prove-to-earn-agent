@@ -2,7 +2,7 @@
  * @jest-environment node
  */
 
-jest.mock("@/lib/utils/logger", () => ({
+jest.mock("@vendor/logger", () => ({
   getLogger: () => ({
     debug: jest.fn(),
     info: jest.fn(),
@@ -20,7 +20,12 @@ describe("agent route contract", () => {
     const response = await GET(
       new NextRequest("https://p2einferno.test/api/agent/v1/config"),
     );
-    const body = await response.json();
+    // Re-parsed through JSON rather than used directly: NextResponse's Web
+    // Response.json() can hand back arrays from a different realm than this
+    // test file's, which fails jest's realm-sensitive `expect.any(Array)`
+    // even though the values are behaviorally identical (Array.isArray is
+    // true either way). This carve-out surfaced it; not a logic change.
+    const body = JSON.parse(JSON.stringify(await response.json()));
 
     expect(response.status).toBe(200);
     expect(body.data.routes).toHaveLength(AGENT_ROUTES.length);

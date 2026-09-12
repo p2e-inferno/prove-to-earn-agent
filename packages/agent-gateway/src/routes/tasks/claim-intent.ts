@@ -1,7 +1,7 @@
 import { buildRewardClaimIntent } from "../../intents/attestation";
 import { templateIdForCompletion } from "../../db/agents";
 import { createAgentRoute } from "../../route-factory";
-import { fail, ok } from "@/lib/quests/principal";
+import { fail, ok } from "@vendor/quests/principal";
 import { isUuid } from "../../validation";
 
 /**

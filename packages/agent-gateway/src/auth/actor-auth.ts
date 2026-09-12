@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import type { QuestPrincipal } from "@/lib/quests/principal";
+import type { QuestPrincipal } from "@vendor/quests/principal";
 import {
   findAgentByWallet,
   loadPermissions,

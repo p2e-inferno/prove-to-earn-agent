@@ -1,13 +1,13 @@
 import { SchemaEncoder } from "@ethereum-attestation-service/eas-sdk";
-import { createAgentAdminClient } from "@/lib/supabase/agent-schema";
-import { getLogger } from "@/lib/utils/logger";
-import { isEASEnabled } from "@/lib/attestation/core/config";
+import { createAgentAdminClient } from "@adapters/datastore";
+import { getLogger } from "@vendor/logger";
+import { isEASEnabled } from "@adapters/attestation";
 import {
   resolveNetworkConfig,
   getDefaultNetworkName,
-} from "@/lib/attestation/core/network-config";
-import { resolveSchemaUID } from "@/lib/attestation/schemas";
-import type { QuestPrincipal } from "@/lib/quests/principal";
+} from "@adapters/attestation";
+import { resolveSchemaUID } from "@adapters/attestation";
+import type { QuestPrincipal } from "@vendor/quests/principal";
 
 const log = getLogger("agent-gateway:intents:attestation");
 

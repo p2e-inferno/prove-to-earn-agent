@@ -4,7 +4,7 @@
 
 const chatCompletion = jest.fn();
 
-jest.mock("@/lib/ai/client", () => ({
+jest.mock("@vendor/ai-client", () => ({
   chatCompletion: (...args: unknown[]) => chatCompletion(...args),
 }));
 

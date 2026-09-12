@@ -1,6 +1,6 @@
 import { loadPlatformConfig } from "@/packages/agent-runner/src/config";
 import { isAddress } from "viem";
-import { isUpstashRedisConfigured } from "@/lib/upstash/redis";
+import { isUpstashRedisConfigured } from "@vendor/upstash-redis";
 
 export interface AgentConfigCheck {
   name: string;

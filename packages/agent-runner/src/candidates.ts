@@ -4,10 +4,10 @@ import {
   DEFAULT_SLIPPAGE_BPS,
   FEE_CONFIG,
   UNISWAP_ADDRESSES,
-} from "@/lib/uniswap/constants";
-import { quoteSwapRoute, resolveSwapRoute } from "@/lib/uniswap/route";
+} from "@vendor/uniswap/constants";
+import { quoteSwapRoute, resolveSwapRoute } from "@vendor/uniswap/route";
 import { actionByName, actionForTaskType } from "./actions/registry";
-import { getBaseMainnetTokenAddresses } from "@/lib/wallet/tokenAddresses";
+import { getBaseMainnetTokenAddresses } from "@vendor/wallet-token-addresses";
 import { priceFor } from "@/packages/agent-gateway/src/payments/pricing";
 import { qualifyingBuyForPoints, upRequiredForDg } from "./actions/vendor";
 import {

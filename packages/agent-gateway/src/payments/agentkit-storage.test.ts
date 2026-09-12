@@ -3,10 +3,10 @@ const get = jest.fn();
 const set = jest.fn();
 const getUpstashRedis = jest.fn();
 
-jest.mock("@/lib/upstash/redis", () => ({
+jest.mock("@vendor/upstash-redis", () => ({
   getUpstashRedis: () => getUpstashRedis(),
 }));
-jest.mock("@/lib/utils/logger", () => ({
+jest.mock("@vendor/logger", () => ({
   getLogger: () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }),
 }));
 

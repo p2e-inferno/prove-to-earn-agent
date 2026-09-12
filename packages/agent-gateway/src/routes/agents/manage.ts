@@ -1,12 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { z } from "zod";
-import { getUserWalletAddresses } from "@/lib/auth/privy";
-import { resolveSafeLinkedWalletCandidates } from "@/lib/auth/filter-mapped-linked-wallet";
-import { inngest } from "@/lib/inngest/client";
-import { createAdminClient } from "@/lib/supabase/server";
-import { createAgentAdminClient } from "@/lib/supabase/agent-schema";
-import { getLogger } from "@/lib/utils/logger";
+import { getUserWalletAddresses } from "@adapters/identity";
+import { resolveSafeLinkedWalletCandidates } from "@adapters/identity";
+import { inngest } from "@vendor/inngest-client";
+import { createAdminClient } from "@adapters/datastore";
+import { createAgentAdminClient } from "@adapters/datastore";
+import { getLogger } from "@vendor/logger";
 import { agentError, agentOk } from "../../errors";
 import {
   agentCapacityForOwner,

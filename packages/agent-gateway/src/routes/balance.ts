@@ -1,4 +1,4 @@
-import { getOwnerBalance } from "@/lib/quests/daily-quests/services/balance";
+import { getOwnerBalance } from "@vendor/quests/balance";
 import { createAgentRoute } from "../route-factory";
 
 export const GET = createAgentRoute({

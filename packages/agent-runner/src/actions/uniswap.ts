@@ -3,9 +3,9 @@ import {
   DEFAULT_SLIPPAGE_BPS,
   FEE_CONFIG,
   UNISWAP_ADDRESSES,
-} from "@/lib/uniswap/constants";
-import { quoteSwapRoute, resolveSwapRoute } from "@/lib/uniswap/route";
-import type { SwapDirection, SwapPair } from "@/lib/uniswap/types";
+} from "@vendor/uniswap/constants";
+import { quoteSwapRoute, resolveSwapRoute } from "@vendor/uniswap/route";
+import type { SwapDirection, SwapPair } from "@vendor/uniswap/types";
 import { executeSwap, prepareSwapTransaction } from "../uniswap-action";
 import { readBalances } from "../balances";
 import {

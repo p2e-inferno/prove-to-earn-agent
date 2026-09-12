@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { chatCompletion } from "@/lib/ai/client";
-import type { AIConversationMessage, AIToolDefinition } from "@/lib/ai/types";
+import { chatCompletion } from "@vendor/ai-client";
+import type { AIConversationMessage, AIToolDefinition } from "@vendor/ai-types";
 import {
   actionCandidateSchema,
   actionResultSchema,

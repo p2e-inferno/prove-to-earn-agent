@@ -1,9 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isAddress } from "viem";
 import { base } from "viem/chains";
-import { ERC20_ABI } from "@/lib/blockchain/shared/abi-definitions";
-import { createPublicClientForNetwork } from "@/lib/blockchain/config/clients/public-client";
-import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
+import { ERC20_ABI } from "@vendor/blockchain/abi-definitions";
+import { createPublicClientForNetwork } from "@vendor/blockchain/public-client";
+import { UNISWAP_ADDRESSES } from "@vendor/uniswap/constants";
 import { assetAmount } from "@/packages/agent-runner/src/actions/types";
 import { findOwnedAgent } from "../../db/agents";
 import { agentError, agentOk } from "../../errors";

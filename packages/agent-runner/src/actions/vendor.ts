@@ -1,8 +1,8 @@
 import { encodeFunctionData } from "viem";
 import { z } from "zod";
-import { DG_TOKEN_VENDOR_ABI } from "@/lib/blockchain/shared/vendor-abi";
-import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
-import { estimateBuy, estimateBuyInput, estimateSell } from "@/lib/vendor/math";
+import { DG_TOKEN_VENDOR_ABI } from "@vendor/blockchain/vendor-abi";
+import { UNISWAP_ADDRESSES } from "@vendor/uniswap/constants";
+import { estimateBuy, estimateBuyInput, estimateSell } from "@vendor/dg-vendor-math";
 import { ensureErc20Allowance } from "../approvals";
 import { readBalances } from "../balances";
 import {

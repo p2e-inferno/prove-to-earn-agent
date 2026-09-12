@@ -9,7 +9,7 @@ const executeCandidate = jest.fn();
 const chatCompletion = jest.fn();
 let modelCandidateIds: string[] = [];
 
-jest.mock("@/lib/ai/client", () => ({
+jest.mock("@vendor/ai-client", () => ({
   chatCompletion: (...args: unknown[]) => chatCompletion(...args),
 }));
 

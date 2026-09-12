@@ -2,7 +2,7 @@
  * @jest-environment node
  */
 
-jest.mock("@/lib/utils/logger", () => ({
+jest.mock("@vendor/logger", () => ({
   getLogger: () => ({
     debug: jest.fn(),
     info: jest.fn(),

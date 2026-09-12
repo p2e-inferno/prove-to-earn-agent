@@ -14,8 +14,8 @@ jest.mock("./balances", () => ({
   readBalances: (...args: unknown[]) => readBalances(...args),
 }));
 
-jest.mock("@/lib/uniswap/route", () => ({
-  ...jest.requireActual("@/lib/uniswap/route"),
+jest.mock("@vendor/uniswap/route", () => ({
+  ...jest.requireActual("@vendor/uniswap/route"),
   quoteSwapRoute: (...args: unknown[]) => quoteSwapRoute(...args),
 }));
 

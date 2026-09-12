@@ -1,6 +1,6 @@
-import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
-import { ERC20_ABI } from "@/lib/blockchain/shared/abi-definitions";
-import { DG_TOKEN_VENDOR_ABI } from "@/lib/blockchain/shared/vendor-abi";
+import { UNISWAP_ADDRESSES } from "@vendor/uniswap/constants";
+import { ERC20_ABI } from "@vendor/blockchain/abi-definitions";
+import { DG_TOKEN_VENDOR_ABI } from "@vendor/blockchain/vendor-abi";
 import type { ReadOnlyAgentWallet } from "./actions/types";
 
 export interface WalletBalances {

@@ -2,10 +2,10 @@ import { encodeFunctionData } from "viem";
 import {
   checkErc20ApprovalForPermit2,
   checkPermit2Allowance,
-} from "@/lib/uniswap/permit2";
-import { PERMIT2_ABI } from "@/lib/uniswap/abi/permit2";
-import { ERC20_ABI } from "@/lib/blockchain/shared/abi-definitions";
-import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
+} from "@vendor/uniswap/permit2";
+import { PERMIT2_ABI } from "@vendor/uniswap/abi/permit2";
+import { ERC20_ABI } from "@vendor/blockchain/abi-definitions";
+import { UNISWAP_ADDRESSES } from "@vendor/uniswap/constants";
 import type { ActionContext } from "./actions/types";
 import type { AgentWallet } from "./wallet";
 

@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { inngest } from "@/lib/inngest/client";
-import { createAgentAdminClient } from "@/lib/supabase/agent-schema";
+import { inngest } from "@vendor/inngest-client";
+import { createAgentAdminClient } from "@adapters/datastore";
 import { findOwnedAgent } from "../../db/agents";
 import { agentError, agentOk } from "../../errors";
 import { createPairingRoute } from "../../route-factory";

@@ -1,7 +1,7 @@
-import { completeDailyTask } from "@/lib/quests/daily-quests/services/complete-task";
+import { completeDailyTask } from "@adapters/quests";
 import { templateIdForRun } from "../../db/agents";
 import { createAgentRoute } from "../../route-factory";
-import { fail } from "@/lib/quests/principal";
+import { fail } from "@vendor/quests/principal";
 
 type Body = {
   dailyQuestRunId?: string;

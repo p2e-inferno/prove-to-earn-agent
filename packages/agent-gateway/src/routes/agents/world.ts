@@ -9,12 +9,12 @@ import {
   nextAgentBookNonce,
   normalizeAgentBookProof,
   submitAgentBookRegistration,
-} from "@/lib/agent-world/registration";
-import { callWithAgentLifecycleVersion } from "@/lib/agent-world/lifecycle";
-import { inngest } from "@/lib/inngest/client";
-import { createAgentAdminClient } from "@/lib/supabase/agent-schema";
-import { getLogger } from "@/lib/utils/logger";
-import { rateLimiter } from "@/lib/utils/agent-rate-limiter";
+} from "@vendor/agent-world/registration";
+import { callWithAgentLifecycleVersion } from "@vendor/agent-world/lifecycle";
+import { inngest } from "@vendor/inngest-client";
+import { createAgentAdminClient } from "@adapters/datastore";
+import { getLogger } from "@vendor/logger";
+import { rateLimiter } from "@vendor/agent-rate-limiter";
 import { findOwnedAgent } from "../../db/agents";
 import { agentError, agentOk } from "../../errors";
 import { createPairingRoute } from "../../route-factory";

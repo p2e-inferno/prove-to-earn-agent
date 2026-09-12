@@ -1,6 +1,6 @@
 import { type Address, type Hex } from "viem";
 import { z, type ZodType } from "zod";
-import { formatAmount } from "@/lib/vendor/math";
+import { formatAmount } from "@vendor/dg-vendor-math";
 import type { RunnerConfig } from "../config";
 import type { AgentWallet } from "../wallet";
 

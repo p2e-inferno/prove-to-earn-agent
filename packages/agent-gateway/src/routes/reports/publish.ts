@@ -4,7 +4,7 @@ import {
   recordAgentRunReport,
   listAgentRunReports,
   type AgentRunReportInput,
-} from "@/lib/quests/daily-quests/services/reports";
+} from "@vendor/quests/reports";
 import { createAgentRoute, createPairingRoute } from "../../route-factory";
 import { agentError, toEnvelope } from "../../errors";
 

@@ -2,11 +2,11 @@
  * @jest-environment node
  */
 
-import { resolveSwapRoute } from "@/lib/uniswap/route";
-import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
+import { resolveSwapRoute } from "@vendor/uniswap/route";
+import { UNISWAP_ADDRESSES } from "@vendor/uniswap/constants";
 import { poolsForPair } from "../uniswap-action";
 import { uniswapSwapAction } from "./uniswap";
-import type { SwapDirection, SwapPair } from "@/lib/uniswap/types";
+import type { SwapDirection, SwapPair } from "@vendor/uniswap/types";
 
 const PAIRS: SwapPair[] = ["ETH_UP", "ETH_USDC", "UP_USDC"];
 const DIRECTIONS: SwapDirection[] = ["A_TO_B", "B_TO_A"];

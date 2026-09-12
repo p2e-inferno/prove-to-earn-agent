@@ -1,8 +1,8 @@
-import { claimDailyTaskReward } from "@/lib/quests/daily-quests/services/claim-task-reward";
+import { claimDailyTaskReward } from "@adapters/quests";
 import { templateIdForCompletion } from "../../db/agents";
 import { createAgentRoute } from "../../route-factory";
-import { fail } from "@/lib/quests/principal";
-import type { DelegatedAttestationSignature } from "@/lib/attestation/api/types";
+import { fail } from "@vendor/quests/principal";
+import type { DelegatedAttestationSignature } from "@adapters/attestation-types";
 
 type Body = {
   completionId?: string;

@@ -41,7 +41,7 @@ jest.mock("@x402/next", () => ({
   },
 }));
 
-jest.mock("@/lib/utils/logger", () => ({
+jest.mock("@vendor/logger", () => ({
   getLogger: () => ({
     debug: jest.fn(),
     info: jest.fn(),

@@ -1,4 +1,4 @@
-import { listDailyQuests } from "@/lib/quests/daily-quests/services/read";
+import { listDailyQuests } from "@adapters/quests";
 import { createAgentRoute } from "../../route-factory";
 
 export const GET = createAgentRoute({

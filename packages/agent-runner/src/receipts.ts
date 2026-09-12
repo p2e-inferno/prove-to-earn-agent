@@ -1,5 +1,5 @@
 import { decodeEventLog, isAddressEqual, type Hex } from "viem";
-import { ERC20_TRANSFER_EVENT } from "@/lib/blockchain/shared/abi-definitions";
+import { ERC20_TRANSFER_EVENT } from "@vendor/blockchain/abi-definitions";
 import { assetAmount, type Asset, type AssetAmount } from "./actions/types";
 
 export interface ReceiptLog {

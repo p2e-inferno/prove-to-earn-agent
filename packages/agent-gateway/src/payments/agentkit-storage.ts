@@ -1,7 +1,7 @@
 import { AGENT_ROUTES } from "./pricing";
 import type { AgentKitStorage } from "@worldcoin/agentkit";
-import { getUpstashRedis } from "@/lib/upstash/redis";
-import { getLogger } from "@/lib/utils/logger";
+import { getUpstashRedis } from "@vendor/upstash-redis";
+import { getLogger } from "@vendor/logger";
 
 const log = getLogger("agent-gateway:payments:agentkit-storage");
 

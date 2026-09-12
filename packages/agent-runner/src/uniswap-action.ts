@@ -1,14 +1,14 @@
-import { encodeSwapWithFeeManual } from "@/lib/uniswap/encode-swap";
+import { encodeSwapWithFeeManual } from "@vendor/uniswap/encode-swap";
 import {
   UNISWAP_ADDRESSES,
   FEE_CONFIG,
   ROUTE_CONFIG,
   DEFAULT_DEADLINE_SECONDS,
   DEFAULT_SLIPPAGE_BPS,
-} from "@/lib/uniswap/constants";
-import { quoteSwapRoute, resolveSwapRoute } from "@/lib/uniswap/route";
-import { getDataSuffix } from "@/lib/blockchain/attribution";
-import type { SwapDirection, SwapPair } from "@/lib/uniswap/types";
+} from "@vendor/uniswap/constants";
+import { quoteSwapRoute, resolveSwapRoute } from "@vendor/uniswap/route";
+import { getDataSuffix } from "@vendor/blockchain/attribution";
+import type { SwapDirection, SwapPair } from "@vendor/uniswap/types";
 import type { AgentWallet } from "./wallet";
 import type { ActionContext, ReadOnlyAgentWallet } from "./actions/types";
 import { ensureSwapApprovals, type ApprovalStep } from "./approvals";

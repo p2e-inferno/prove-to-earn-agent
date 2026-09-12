@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { ensureWalletBoundOrRespond } from "@/lib/auth/wallet-bound-auth";
+import { ensureWalletBoundOrRespond } from "@adapters/identity";
 import { headlessAgentAuthEnabled, agentAudienceOrigin } from "../env";
 
 export type HeadlessOwnerContext = {

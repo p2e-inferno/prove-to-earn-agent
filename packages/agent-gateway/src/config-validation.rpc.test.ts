@@ -1,4 +1,4 @@
-jest.mock("@/lib/upstash/redis", () => ({
+jest.mock("@vendor/upstash-redis", () => ({
   isUpstashRedisConfigured: () => true,
 }));
 

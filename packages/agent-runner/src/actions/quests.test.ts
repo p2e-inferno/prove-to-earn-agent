@@ -3,8 +3,8 @@
  */
 
 import { decodeFunctionData } from "viem";
-import { UNLOCK_FACTORY_ABI } from "@/lib/blockchain/shared/abi-definitions";
-import { UNLOCK_FACTORY_ADDRESSES } from "@/constants/unlock_factory_addresses";
+import { UNLOCK_FACTORY_ABI } from "@vendor/blockchain/abi-definitions";
+import { UNLOCK_FACTORY_ADDRESSES } from "@vendor/unlock-factory-addresses";
 import { dailyCheckinAction, deployLockAction, gasDropAction } from "./quests";
 import { resultTxHash, type ActionContext } from "./types";
 

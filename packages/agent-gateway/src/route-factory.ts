@@ -1,8 +1,8 @@
 import { AsyncLocalStorage } from "async_hooks";
 import { NextResponse, type NextRequest } from "next/server";
 import { withX402FromHTTPServer } from "@x402/next";
-import type { QuestPrincipal, ServiceResult } from "@/lib/quests/principal";
-import { getLogger } from "@/lib/utils/logger";
+import type { QuestPrincipal, ServiceResult } from "@vendor/quests/principal";
+import { getLogger } from "@vendor/logger";
 import { resolveAgentActor, type AgentActor } from "./auth/actor-auth";
 import { hasCapability } from "./db/agents";
 import {
@@ -457,13 +457,13 @@ export function createPairingRoute(options: {
 
     if (options.guard === "admin-session") {
       const { ensureAdminOrRespond } =
-        await import("@/lib/auth/route-handlers/admin-guard");
+        await import("@adapters/admin-guard");
       const denied = await ensureAdminOrRespond(req);
       if (denied) return denied;
     }
 
     if (options.guard === "owner-privy-session") {
-      const { getPrivyUserFromNextRequest } = await import("@/lib/auth/privy");
+      const { getPrivyUserFromNextRequest } = await import("@adapters/identity");
       const user = await getPrivyUserFromNextRequest(req);
       if (!user?.id && options.guard === "owner-privy-session") {
         return agentError(

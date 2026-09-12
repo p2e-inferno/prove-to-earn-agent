@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
-import { createAgentAdminClient } from "@/lib/supabase/agent-schema";
-import { getLogger } from "@/lib/utils/logger";
+import { createAgentAdminClient } from "@adapters/datastore";
+import { getLogger } from "@vendor/logger";
 
 const log = getLogger("agent-gateway:db:idempotency");
 

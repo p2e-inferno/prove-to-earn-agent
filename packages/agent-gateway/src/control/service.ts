@@ -1,11 +1,11 @@
 import { base } from "viem/chains";
 import { decisionFrameV1Schema } from "@p2e/agent-contracts";
-import { createPublicClientForNetwork } from "@/lib/blockchain/config/clients/public-client";
-import { hasActiveChatMembership } from "@/lib/chat/server/respond-membership";
-import { describeQuestAvailability } from "@/lib/agent-chat/server/executable-quests";
-import { inngest } from "@/lib/inngest/client";
-import { listDailyQuests } from "@/lib/quests/daily-quests/services/read";
-import { createHeadlessAgentAdminClient } from "@/lib/supabase/headless-agent-schema";
+import { createPublicClientForNetwork } from "@vendor/blockchain/public-client";
+import { hasActiveChatMembership } from "@adapters/membership";
+import { describeQuestAvailability } from "@vendor/agent-chat/executable-quests";
+import { inngest } from "@vendor/inngest-client";
+import { listDailyQuests } from "@adapters/quests";
+import { createHeadlessAgentAdminClient } from "@adapters/datastore";
 import {
   assessAdmission,
   blockedAdmission,

@@ -14,7 +14,7 @@ import {
 import { createAgentBookVerifier } from "@worldcoin/agentkit-core";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { NextRequest, type NextResponse } from "next/server";
-import { getLogger } from "@/lib/utils/logger";
+import { getLogger } from "@vendor/logger";
 import {
   AGENT_NETWORK,
   agentkitDiscountPercent,

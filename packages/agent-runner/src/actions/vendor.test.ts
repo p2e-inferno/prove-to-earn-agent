@@ -17,7 +17,7 @@ import {
   vendorLightUpAction,
   vendorSellAction,
 } from "./vendor";
-import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
+import { UNISWAP_ADDRESSES } from "@vendor/uniswap/constants";
 import { resultApprovals, resultTxHash, type ActionContext } from "./types";
 
 const simulateContract = jest.fn();

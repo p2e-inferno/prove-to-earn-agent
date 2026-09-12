@@ -1,8 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { ethers } from "ethers";
 import { createAgentBookVerifier } from "@worldcoin/agentkit-core";
-import { createAgentAdminClient } from "@/lib/supabase/agent-schema";
-import { getLogger } from "@/lib/utils/logger";
+import { createAgentAdminClient } from "@adapters/datastore";
+import { getLogger } from "@vendor/logger";
 import { agentError, agentOk } from "../../errors";
 import { loadStoredGrant, recoverGrantSigner } from "../../auth/grant";
 import { createPairingRoute } from "../../route-factory";

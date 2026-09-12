@@ -1,8 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { getUserWalletAddresses } from "@/lib/auth/privy";
-import { resolveSafeLinkedWalletCandidates } from "@/lib/auth/filter-mapped-linked-wallet";
-import { createAdminClient } from "@/lib/supabase/server";
-import { getLogger } from "@/lib/utils/logger";
+import { getUserWalletAddresses } from "@adapters/identity";
+import { resolveSafeLinkedWalletCandidates } from "@adapters/identity";
+import { createAdminClient } from "@adapters/datastore";
+import { getLogger } from "@vendor/logger";
 import { ethers } from "ethers";
 import { agentError, agentOk } from "../../errors";
 import {

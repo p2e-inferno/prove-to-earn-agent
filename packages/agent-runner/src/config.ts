@@ -1,4 +1,4 @@
-import { getClientRpcUrls } from "@/lib/blockchain/config";
+import { getClientRpcUrls } from "@vendor/blockchain/rpc-config";
 
 export type WalletProvider = "cdp" | "local";
 

@@ -1,11 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { inngest } from "@/lib/inngest/client";
-import { appendAgentReply } from "@/lib/agent-chat/server/store";
-import { getLogger } from "@/lib/utils/logger";
+import { inngest } from "@vendor/inngest-client";
+import { appendAgentReply } from "@vendor/agent-chat/store";
+import { getLogger } from "@vendor/logger";
 import {
   listOwnerAgentExecutions,
   resolveOwnerAgentDecision,
-} from "@/lib/quests/daily-quests/services/agent-execution";
+} from "@vendor/quests/agent-execution";
 import { agentError, toEnvelope } from "../../errors";
 import { createPairingRoute } from "../../route-factory";
 

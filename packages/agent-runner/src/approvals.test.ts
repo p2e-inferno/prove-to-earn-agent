@@ -3,7 +3,7 @@
  */
 
 import { ensureSwapApprovals, ensureErc20Allowance } from "./approvals";
-import { UNISWAP_ADDRESSES } from "@/lib/uniswap/constants";
+import { UNISWAP_ADDRESSES } from "@vendor/uniswap/constants";
 import type { AgentWallet } from "./wallet";
 
 const MAX_UINT256 = (1n << 256n) - 1n;

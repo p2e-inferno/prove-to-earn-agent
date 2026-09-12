@@ -1,7 +1,7 @@
-import { completeDailyQuest } from "@/lib/quests/daily-quests/services/complete-quest";
+import { completeDailyQuest } from "@adapters/quests";
 import { templateIdForRun } from "../../db/agents";
 import { createAgentRoute } from "../../route-factory";
-import { fail } from "@/lib/quests/principal";
+import { fail } from "@vendor/quests/principal";
 
 export const POST = createAgentRoute({
   routeId: "quests.complete",

@@ -1,7 +1,7 @@
 import { base } from "viem/chains";
-import { createPublicClientForNetwork } from "@/lib/blockchain/config/clients/public-client";
-import { describeQuestAvailability } from "@/lib/agent-chat/server/executable-quests";
-import { ok, fail } from "@/lib/quests/principal";
+import { createPublicClientForNetwork } from "@vendor/blockchain/public-client";
+import { describeQuestAvailability } from "@vendor/agent-chat/executable-quests";
+import { ok, fail } from "@vendor/quests/principal";
 import {
   assessAdmission,
   blockedAdmission,

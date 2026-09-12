@@ -1,6 +1,6 @@
-import { chatCompletion } from "@/lib/ai/client";
+import { chatCompletion } from "@vendor/ai-client";
 import { z } from "zod";
-import type { AIConversationMessage } from "@/lib/ai/types";
+import type { AIConversationMessage } from "@vendor/ai-types";
 import type { RunnerConfig } from "./config";
 import type { AssetAmount } from "./actions/types";
 import type { RunSpend } from "./spend";

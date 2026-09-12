@@ -1,5 +1,5 @@
-import { fail } from "@/lib/quests/principal";
-import { mutateAgentRunExecution } from "@/lib/quests/daily-quests/services/agent-execution";
+import { fail } from "@vendor/quests/principal";
+import { mutateAgentRunExecution } from "@vendor/quests/agent-execution";
 import { templateIdForRun } from "../../db/agents";
 import { createAgentRoute } from "../../route-factory";
 

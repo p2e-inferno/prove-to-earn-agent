@@ -8,7 +8,7 @@ jest.mock("../env", () => ({
   headlessAgentApiEnabled: () => true,
   headlessAgentIssuer: () => "https://p2einferno.example",
 }));
-jest.mock("@/lib/utils/agent-rate-limiter", () => ({
+jest.mock("@vendor/agent-rate-limiter", () => ({
   rateLimiter: { check: jest.fn() },
 }));
 jest.mock("../payments/x402", () => ({
@@ -19,7 +19,7 @@ import { createHeadlessControlRoute } from "./route";
 
 const mockResolveHeadlessActor = jest.requireMock("../auth/headless-session")
   .resolveHeadlessActor as jest.Mock;
-const mockRateLimiter = jest.requireMock("@/lib/utils/agent-rate-limiter")
+const mockRateLimiter = jest.requireMock("@vendor/agent-rate-limiter")
   .rateLimiter.check as jest.Mock;
 const mockInvokeCanonicalEconomicRoute = jest.requireMock("../payments/x402")
   .invokeCanonicalEconomicRoute as jest.Mock;

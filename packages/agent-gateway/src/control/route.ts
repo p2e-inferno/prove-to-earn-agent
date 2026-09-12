@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import { NextResponse, type NextRequest } from "next/server";
-import { rateLimiter } from "@/lib/utils/agent-rate-limiter";
+import { rateLimiter } from "@vendor/agent-rate-limiter";
 import { resolveHeadlessActor } from "../auth/headless-session";
 import { headlessAgentApiEnabled, headlessAgentIssuer } from "../env";
 import { invokeCanonicalEconomicRoute } from "../payments/x402";

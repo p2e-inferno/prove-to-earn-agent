@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { rateLimiter } from "@/lib/utils/agent-rate-limiter";
+import { rateLimiter } from "@vendor/agent-rate-limiter";
 import { AGENT_ROUTES } from "../../payments/pricing";
 import { agentError, agentOk } from "../../errors";
 import { createPairingRoute } from "../../route-factory";

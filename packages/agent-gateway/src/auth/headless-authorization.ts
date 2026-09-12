@@ -7,8 +7,8 @@ import {
   type AuthorizationPolicyV1,
   type AuthorizationTypedMessage,
 } from "@p2e/agent-contracts";
-import { createHeadlessAgentAdminClient } from "@/lib/supabase/headless-agent-schema";
-import { DEFAULT_SLIPPAGE_BPS } from "@/lib/uniswap/constants";
+import { createHeadlessAgentAdminClient } from "@adapters/datastore";
+import { DEFAULT_SLIPPAGE_BPS } from "@vendor/uniswap/constants";
 import {
   findOwnedAgent,
   hasCapability,
