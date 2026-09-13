@@ -1,5 +1,9 @@
 /** @jest-environment node */
-import { verifiedDiscountHook, routeConfigFor } from "./x402";
+import {
+  canonicalAgentkitResourceUrl,
+  verifiedDiscountHook,
+  routeConfigFor,
+} from "./x402";
 import { priceFor } from "./pricing";
 const verify = jest.fn();
 const recover = jest.fn();
@@ -8,6 +12,7 @@ const context = (amount = "50") =>
   ({
     paymentPayload: {
       x402Version: 2,
+      accepted: { amount: "100" },
       payload: { authorization: { value: amount } },
     },
     requirements: { amount: "100" },
@@ -24,9 +29,12 @@ it("verifies the discounted authorization before invoking SDK recovery", async (
   verify.mockResolvedValue({ isValid: true });
   recover.mockResolvedValue({ recovered: true, result: { isValid: true } });
   await expect(hook(context())).resolves.toMatchObject({ recovered: true });
-  expect(verify).toHaveBeenCalledWith(context().paymentPayload, {
-    amount: "50",
-  });
+  expect(verify).toHaveBeenCalledWith(
+    expect.objectContaining({
+      accepted: expect.objectContaining({ amount: "50" }),
+    }),
+    { amount: "50" },
+  );
   expect(verify.mock.invocationCallOrder[0]).toBeLessThan(
     recover.mock.invocationCallOrder[0]!,
   );
@@ -99,4 +107,45 @@ describe("full-price fallback", () => {
     expect(verify).toHaveBeenCalled();
     expect(recover).toHaveBeenCalled();
   });
+});
+
+describe("canonical AgentKit origin", () => {
+  const originalOrigin = process.env.NEXT_PUBLIC_APP_URL;
+  const originalNodeEnv = process.env.NODE_ENV;
+
+  afterEach(() => {
+    process.env.NEXT_PUBLIC_APP_URL = originalOrigin;
+    Object.defineProperty(process.env, "NODE_ENV", {
+      configurable: true,
+      value: originalNodeEnv,
+    });
+  });
+
+  it.each([
+    {
+      name: "direct local requests",
+      configured: "http://localhost:3000",
+      incoming: "http://localhost:3000/api/agent/v1/quests?limit=1",
+      expected: "http://localhost:3000/api/agent/v1/quests?limit=1",
+    },
+    {
+      name: "a local public proxy",
+      configured: "https://public-tunnel.example",
+      incoming: "http://localhost:3000/api/agent/v1/quests?limit=1",
+      expected: "https://public-tunnel.example/api/agent/v1/quests?limit=1",
+    },
+    {
+      name: "production",
+      configured: "https://app.p2einferno.com",
+      incoming: "http://internal-next:3000/api/agent/v1/quests?limit=1",
+      expected: "https://app.p2einferno.com/api/agent/v1/quests?limit=1",
+    },
+  ])(
+    "uses the configured origin for $name",
+    ({ configured, incoming, expected }) => {
+      process.env.NEXT_PUBLIC_APP_URL = configured;
+
+      expect(canonicalAgentkitResourceUrl(incoming)).toBe(expected);
+    },
+  );
 });

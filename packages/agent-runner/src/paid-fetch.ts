@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import { x402Client, x402HTTPClient } from "@x402/core/client";
+import type { PaymentPayload } from "@x402/core/types";
 import { registerExactEvmScheme } from "@x402/evm/exact/client";
 import { AGENTKIT, type AgentkitExtension } from "@worldcoin/agentkit-core";
 import { createAgentkitClient } from "@worldcoin/agentkit";
@@ -13,7 +14,11 @@ export interface PaidFetchOptions {
   bearerToken?: string;
   maxPaymentRaw?: string;
   paymentLifecycle?: X402PaymentLifecycle;
+  discountEligibility?: WorldDiscountEligibility;
 }
+
+// Must come from trusted server state; "unverified" skips identity-gated pricing.
+export type WorldDiscountEligibility = "verified" | "unverified" | "unknown";
 
 export interface X402PaymentLifecycle {
   beforePayment(input: {
@@ -32,6 +37,7 @@ export interface PaidFetchResult<T = unknown> {
   status: number;
   ok: boolean;
   code?: string;
+  category?: "payment" | "transport" | "authentication";
   message?: string;
   retryable?: boolean;
   data?: T;
@@ -148,6 +154,25 @@ export function applyDiscount(
   return { ...paymentRequired, accepts: discountedAccepts };
 }
 
+export function restoreCanonicalAcceptedRequirement(
+  payload: PaymentPayload,
+  discountedQuote: PaymentRequired,
+  canonicalQuote: PaymentRequired,
+): PaymentPayload {
+  if (payload.x402Version !== 2) {
+    throw new Error("X402_DISCOUNT_REQUIRES_V2");
+  }
+  const selectedIndex = discountedQuote.accepts.findIndex(
+    (requirement) =>
+      JSON.stringify(requirement) === JSON.stringify(payload.accepted),
+  );
+  const canonical = canonicalQuote.accepts[selectedIndex];
+  if (selectedIndex < 0 || !canonical) {
+    throw new Error("X402_DISCOUNT_REQUIREMENT_MISMATCH");
+  }
+  return { ...payload, accepted: canonical };
+}
+
 function quoteWithinBudget(
   paymentRequired: PaymentRequired,
   maxPaymentRaw: string | undefined,
@@ -170,6 +195,7 @@ function paymentBudgetFailure<T>(): PaidFetchResult<T> {
     status: 403,
     ok: false,
     code: "X402_PAYMENT_BUDGET_EXCEEDED",
+    category: "payment",
     message: "The quoted payment exceeds the remaining authorized budget.",
     retryable: false,
     paid: false,
@@ -256,7 +282,10 @@ export async function paidFetch<T = unknown>(
   };
 
   let paymentRequired = await readQuote(response);
-  const extension = readAgentkitExtension(paymentRequired);
+  const extension =
+    options.discountEligibility === "unverified"
+      ? null
+      : readAgentkitExtension(paymentRequired);
   const mode = extension?.mode;
 
   // 'free' and 'free-trial' are granted by the identity header alone: the hook
@@ -303,9 +332,20 @@ export async function paidFetch<T = unknown>(
           "discount",
           discountedQuote.accepts?.[0]?.amount,
         );
-        let payload;
+        let payload: PaymentPayload | null;
+        let discountedAmountRaw: string | undefined;
         try {
-          payload = await http.createPaymentPayload(discountedQuote);
+          const discountedPayload =
+            await http.createPaymentPayload(discountedQuote);
+          if (discountedPayload.x402Version !== 2) {
+            throw new Error("X402_DISCOUNT_REQUIRES_V2");
+          }
+          discountedAmountRaw = discountedPayload.accepted.amount;
+          payload = restoreCanonicalAcceptedRequirement(
+            discountedPayload,
+            discountedQuote,
+            paymentRequired,
+          );
         } catch {
           await recordPaymentResult(options, reservation, false);
           payload = null;
@@ -322,7 +362,7 @@ export async function paidFetch<T = unknown>(
 
           if (discountedResponse.status !== 402) {
             await recordPaymentResult(options, reservation, true);
-            const paidAmountRaw = discountedQuote.accepts?.[0]?.amount;
+            const paidAmountRaw = discountedAmountRaw;
             return toResult<T>(
               discountedResponse,
               true,
@@ -425,6 +465,12 @@ async function toResult<T>(
       (paid && response.status === 402
         ? "X402_PAYMENT_VALIDATION_FAILED"
         : undefined),
+    category:
+      typeof body.data.category === "string"
+        ? (body.data.category as PaidFetchResult["category"])
+        : paid && response.status === 402
+          ? "payment"
+          : undefined,
     message:
       body.data.message ??
       (paid && response.status === 402
@@ -445,6 +491,7 @@ const responseEnvelopeSchema = z
   .object({
     ok: z.boolean().optional(),
     code: z.string().optional(),
+    category: z.enum(["payment", "transport", "authentication"]).optional(),
     message: z.string().optional(),
     retryable: z.boolean().optional(),
     data: z.unknown().optional(),

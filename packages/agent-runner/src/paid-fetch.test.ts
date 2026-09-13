@@ -24,13 +24,21 @@ jest.mock("@x402/core/client", () => ({
     createPaymentPayload(paymentRequired: { accepts: { amount: string }[] }) {
       return createPaymentPayload(paymentRequired);
     }
-    encodePaymentSignatureHeader(payload: { accepted: { amount: string } }) {
-      return { "PAYMENT-SIGNATURE": `signed:${payload.accepted.amount}` };
+    encodePaymentSignatureHeader(payload: {
+      payload: { authorization: { value: string } };
+    }) {
+      return {
+        "PAYMENT-SIGNATURE": `signed:${payload.payload.authorization.value}`,
+      };
     }
   },
 }));
 
-import { applyDiscount, paidFetch } from "./paid-fetch";
+import {
+  applyDiscount,
+  paidFetch,
+  restoreCanonicalAcceptedRequirement,
+} from "./paid-fetch";
 import type { AgentWallet } from "./wallet";
 
 const FULL_PRICE = "1000";
@@ -105,6 +113,27 @@ describe("applyDiscount", () => {
   it("refuses a discount that rounds the quote to nothing", () => {
     expect(applyDiscount(quote({ amount: "1" }) as never, 50)).toBeNull();
   });
+
+  it("keeps the signed discount while restoring the canonical accepted quote", () => {
+    const canonical = quote();
+    const discounted = applyDiscount(canonical as never, 50)!;
+    const payload = restoreCanonicalAcceptedRequirement(
+      {
+        x402Version: 2,
+        resource: discounted.resource,
+        accepted: discounted.accepts[0]!,
+        payload: { authorization: { value: "500" } },
+      } as never,
+      discounted as never,
+      canonical as never,
+    ) as unknown as {
+      accepted: { amount: string };
+      payload: { authorization: { value: string } };
+    };
+
+    expect(payload.accepted.amount).toBe("1000");
+    expect(payload.payload.authorization.value).toBe("500");
+  });
 });
 
 describe("paidFetch discount negotiation", () => {
@@ -112,7 +141,12 @@ describe("paidFetch discount negotiation", () => {
     jest.clearAllMocks();
     createPaymentPayload.mockImplementation(
       async (required: { accepts: { amount: string }[] }) => ({
+        x402Version: 2,
+        resource: { url: "https://gateway.test/x" },
         accepted: required.accepts[0],
+        payload: {
+          authorization: { value: required.accepts[0]?.amount },
+        },
       }),
     );
   });
@@ -267,6 +301,97 @@ describe("paidFetch discount negotiation", () => {
       `signed:${FULL_PRICE}`,
     );
     expect(result.discounted).toBe(false);
+  });
+
+  it("pays the initial canonical quote directly for a known-unverified agent", async () => {
+    const canonical = quote({ mode: { type: "discount", percent: 50 } });
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(402, canonical))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    global.fetch = fetchMock as never;
+
+    const result = await paidFetch(wallet, "https://gateway.test/x", {
+      discountEligibility: "unverified",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(createHeader).not.toHaveBeenCalled();
+    expect(createPaymentPayload).toHaveBeenCalledTimes(1);
+    expect(createPaymentPayload).toHaveBeenCalledWith(canonical);
+    const paidHeaders = fetchMock.mock.calls[1]![1].headers;
+    expect(paidHeaders["PAYMENT-SIGNATURE"]).toBe(`signed:${FULL_PRICE}`);
+    expect(paidHeaders[AGENTKIT]).toBeUndefined();
+    expect(
+      fetchMock.mock.calls.some(
+        ([, init]) => init.headers["PAYMENT-SIGNATURE"] === "signed:500",
+      ),
+    ).toBe(false);
+    expect(result).toMatchObject({
+      ok: true,
+      paid: true,
+      discounted: false,
+      paidAmountRaw: FULL_PRICE,
+    });
+  });
+
+  it("still attempts the World discount for a verified agent", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(402, quote({ mode: { type: "discount", percent: 50 } })),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    global.fetch = fetchMock as never;
+
+    const result = await paidFetch(wallet, "https://gateway.test/x", {
+      discountEligibility: "verified",
+    });
+
+    const [payload] = await createPaymentPayload.mock.results[0]!.value.then(
+      (value: unknown) => [value],
+    );
+    expect(createHeader).toHaveBeenCalledTimes(1);
+    expect(payload.payload.authorization.value).toBe("500");
+    expect(fetchMock.mock.calls[1]![1].headers[AGENTKIT]).toBe(
+      "signed-identity-header",
+    );
+    expect(fetchMock.mock.calls[1]![1].headers["PAYMENT-SIGNATURE"]).toBe(
+      "signed:500",
+    );
+    expect(result).toMatchObject({ discounted: true, paidAmountRaw: "500" });
+  });
+
+  it("keeps the discount attempt and fresh full-price fallback when World state is unknown", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(402, quote({ mode: { type: "discount", percent: 50 } })),
+      )
+      .mockResolvedValueOnce(jsonResponse(402, { ok: false }))
+      .mockResolvedValueOnce(jsonResponse(402, quote()))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    global.fetch = fetchMock as never;
+
+    const result = await paidFetch(wallet, "https://gateway.test/x", {
+      discountEligibility: "unknown",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls[1]![1].headers["PAYMENT-SIGNATURE"]).toBe(
+      "signed:500",
+    );
+    expect(
+      fetchMock.mock.calls[2]![1].headers["PAYMENT-SIGNATURE"],
+    ).toBeUndefined();
+    expect(fetchMock.mock.calls[3]![1].headers["PAYMENT-SIGNATURE"]).toBe(
+      `signed:${FULL_PRICE}`,
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      discounted: false,
+      paidAmountRaw: FULL_PRICE,
+    });
   });
 
   it("does not pay when the first response is not a 402", async () => {

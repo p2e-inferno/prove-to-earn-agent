@@ -2,8 +2,11 @@ import {
   HTTPFacilitatorClient,
   x402ResourceServer,
   x402HTTPResourceServer,
+  type HTTPRequestContext,
+  type ProtectedRequestHook,
   type RouteConfig,
 } from "@x402/core/server";
+import type { ResourceServerExtension } from "@x402/core/types";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { withX402FromHTTPServer } from "@x402/next";
 import {
@@ -31,6 +34,17 @@ import { redisAgentKitStorage } from "./agentkit-storage";
 const log = getLogger("agent-gateway:payments:x402");
 
 type AgentkitHooks = ReturnType<typeof createAgentkitHooks>;
+
+export const AGENTKIT_DYNAMIC_INFO_FIELDS = [
+  "nonce",
+  "issuedAt",
+  "expirationTime",
+] as const;
+
+export const agentkitX402ResourceServerExtension: ResourceServerExtension = {
+  ...agentkitResourceServerExtension,
+  dynamicInfoFields: [...AGENTKIT_DYNAMIC_INFO_FIELDS],
+};
 
 let cachedServer: x402ResourceServer | null = null;
 let cachedHooks: AgentkitHooks | null = null;
@@ -62,11 +76,12 @@ function agentkitHooks(): AgentkitHooks | null {
       agentBook,
       mode: discountMode(),
       storage: redisAgentKitStorage,
-      onEvent: (event) =>
+      onEvent: (event) => {
         log.info("agentkit", {
           type: event.type,
           resource: event.resource,
-        }),
+        });
+      },
     });
     return cachedHooks;
   } catch (error) {
@@ -140,7 +155,7 @@ export function getResourceServer(): x402ResourceServer {
 
   const hooks = agentkitHooks();
   if (hooks) {
-    server.registerExtension(agentkitResourceServerExtension);
+    server.registerExtension(agentkitX402ResourceServerExtension);
     if (hooks.verifyFailureHook) {
       const recover = hooks.verifyFailureHook as unknown as Parameters<
         typeof server.onVerifyFailure
@@ -151,6 +166,28 @@ export function getResourceServer(): x402ResourceServer {
 
   cachedServer = server;
   return server;
+}
+
+export function canonicalAgentkitResourceUrl(requestUrl: string): string {
+  const request = new URL(requestUrl);
+  const canonical = new URL(agentAudienceOrigin());
+  canonical.pathname = request.pathname;
+  canonical.search = request.search;
+  canonical.hash = "";
+  return canonical.toString();
+}
+
+function canonicalAgentkitRequestHook(
+  hook: AgentkitHooks["requestHook"],
+): ProtectedRequestHook {
+  return (context: HTTPRequestContext) =>
+    hook({
+      path: context.path,
+      adapter: {
+        getHeader: (name) => context.adapter.getHeader(name),
+        getUrl: () => canonicalAgentkitResourceUrl(context.adapter.getUrl()),
+      },
+    });
 }
 
 /**
@@ -175,9 +212,7 @@ export function getHttpResourceServer(routeId: string): x402HTTPResourceServer {
   const hooks = agentkitHooks();
   if (hooks?.requestHook) {
     httpServer.onProtectedRequest(
-      hooks.requestHook as unknown as Parameters<
-        typeof httpServer.onProtectedRequest
-      >[0],
+      canonicalAgentkitRequestHook(hooks.requestHook),
     );
   }
 
@@ -339,15 +374,15 @@ export function verifiedDiscountHook(
     const full = BigInt(context.requirements.amount);
     const minimum = (full * BigInt(100 - agentkitDiscountPercent())) / 100n;
     if (amount < minimum || amount >= full) return;
-    const verified = await facilitator.verify(
-      JSON.parse(JSON.stringify(context.paymentPayload)) as Parameters<
-        typeof facilitator.verify
-      >[0],
-      {
-        ...context.requirements,
-        amount: raw,
-      },
-    );
+    const verificationPayload = JSON.parse(
+      JSON.stringify(context.paymentPayload),
+    ) as Parameters<typeof facilitator.verify>[0];
+    if (verificationPayload.x402Version !== 2) return;
+    verificationPayload.accepted.amount = raw;
+    const verified = await facilitator.verify(verificationPayload, {
+      ...context.requirements,
+      amount: raw,
+    });
     if (!verified.isValid) return;
     return recover({
       ...context,
