@@ -1,6 +1,7 @@
 import {
   paidFetch,
   type PaidFetchResult,
+  type WorldDiscountEligibility,
   type X402PaymentLifecycle,
 } from "./paid-fetch";
 import { z } from "zod";
@@ -91,6 +92,7 @@ export class AgentSession {
       method?: "GET" | "POST";
       body?: unknown;
       idempotencyKey?: string;
+      discountEligibility?: WorldDiscountEligibility;
     } = {},
   ): Promise<PaidFetchResult<T>> {
     try {
@@ -121,6 +123,7 @@ export class AgentSession {
           status: 409,
           ok: false,
           code: "X402_PAYMENT_RECONCILIATION_REQUIRED",
+          category: "payment",
           message:
             "A prior payment attempt is unresolved, so another payment was not signed.",
           retryable: false,
@@ -133,6 +136,7 @@ export class AgentSession {
           status: 403,
           ok: false,
           code: "X402_PAYMENT_BUDGET_EXCEEDED",
+          category: "payment",
           message: "The payment is outside the signed authorization policy.",
           retryable: false,
           paid: false,
@@ -152,6 +156,9 @@ export class AgentSession {
           : message.startsWith("Session")
             ? "SESSION_FAILED"
             : "TRANSPORT_ERROR",
+        category: message.startsWith("Session")
+          ? "authentication"
+          : "transport",
         message: unreachable
           ? `Could not reach the P2E gateway at ${this.config.gatewayBaseUrl}.`
           : message,

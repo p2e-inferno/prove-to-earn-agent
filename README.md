@@ -58,7 +58,7 @@ The human remains the owner of the P2E account. The agent is an authorized actor
 1. The owner authorizes an agent and defines its scope.
 2. The agent authenticates using its wallet.
 3. The agent discovers available quest work through the gateway.
-4. The runner queries the data and services it needs, including The Graph.
+4. The runner queries live Uniswap and DG Token Vendor history through The Graph and gives that onchain history to the planner as context for the run.
 5. For a supported Uniswap task, the agent prepares the required Permit2 approvals and executes the existing P2E Inferno swap path through Uniswap's Universal Router.
 6. The resulting transaction hash is submitted back to P2E Inferno.
 7. The existing quest logic verifies that the transaction satisfies the task requirements.
@@ -85,7 +85,7 @@ flowchart LR
     Agent -->|wallet auth + x402| Gateway
     Gateway -->|agent identity| World
 
-    Agent -->|live blockchain data| Graph
+    Agent -->|live onchain history| Graph
     Agent -->|execute swap| Uni
     Agent -->|submit tx / claim / complete| Gateway
 
@@ -115,8 +115,8 @@ The minimal example does not require environment variables. It uses the in-memor
 
 At the time of this public extraction:
 
-- `npm run typecheck` passes
-- `npm test` passes 37/37 suites and 353/353 tests
+- `npm run typecheck` passes 
+- `npm test` passes 38/38 suites and 364/364 tests
 - `npm run example` completes the fixture-backed quest flow end to end
 
 For live infrastructure, copy `.env.example` to `.env` and configure the services you want to exercise.
@@ -176,14 +176,28 @@ See [`reference/README.md`](reference/README.md) for details.
 
 ## The Graph
 
-The agent runner can query live blockchain history through The Graph.
+The Graph is the agent's live onchain memory layer.
 
-[`packages/agent-runner/src/graph.ts`](packages/agent-runner/src/graph.ts) contains the query path for:
+Before planning a supported quest run, the runner queries live blockchain history for the agent wallet from:
 
-- Uniswap v3 activity
-- the P2E Inferno DG Token Vendor subgraph
+* the Uniswap v3 subgraph, for recent swap activity
+* the P2E Inferno DG Token Vendor subgraph, for purchases, sales, Light Ups, stage progression, and account totals
 
-The Vendor subgraph is included in:
+These queries are made through The Graph's x402 gateway, so the agent can autonomously pay for the blockchain data it consumes.
+
+The returned history is normalized into structured context, including recent activity and subgraph indexing state, and passed into the agent planner alongside the current quest tasks. The planner can reason over that history while choosing and sequencing safe candidate actions. Graph data does not override quest requirements or safety checks; execution remains bounded by the candidates and constraints produced by the runner.
+
+The same Graph-grounded history is also carried into the run report so the agent can explain the current run in the context of what the wallet has already done onchain.
+
+The live query path is implemented in:
+
+[`packages/agent-runner/src/graph.ts`](packages/agent-runner/src/graph.ts)
+
+The planner consumes that context in:
+
+[`packages/agent-runner/src/planner.ts`](packages/agent-runner/src/planner.ts)
+
+The custom DG Token Vendor subgraph is included in:
 
 [`packages/dg-vendor-subgraph`](packages/dg-vendor-subgraph)
 
@@ -193,3 +207,4 @@ To exercise the live Graph path, configure:
 GRAPH_GATEWAY_URL
 GRAPH_VENDOR_SUBGRAPH_ID
 GRAPH_UNISWAP_SUBGRAPH_ID
+```
